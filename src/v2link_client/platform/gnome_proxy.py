@@ -1,0 +1,1 @@
+"""GNOME proxy backend (placeholder)."""

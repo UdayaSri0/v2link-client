@@ -1,0 +1,1 @@
+"""NetworkManager proxy backend (placeholder)."""

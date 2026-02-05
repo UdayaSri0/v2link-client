@@ -1,0 +1,1 @@
+"""KDE proxy backend (placeholder)."""
