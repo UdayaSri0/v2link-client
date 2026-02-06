@@ -6,6 +6,8 @@ import logging
 
 from PyQt6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
+    QApplication,
+    QComboBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -33,6 +35,7 @@ from v2link_client.core.process_manager import (
 )
 from v2link_client.core.storage import get_config_dir, get_state_dir, load_json, save_json
 from v2link_client.ui.diagnostics_widget import DiagnosticsWidget
+from v2link_client.ui.theme import ThemeName, apply_theme, normalize_theme, theme_display_name
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +71,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("v2link-client")
         self.resize(900, 640)
 
+        self._theme: ThemeName = "dark"
+
         central = QWidget(self)
+        central.setObjectName("central")
         self.setCentralWidget(central)
 
         self.link_input = QLineEdit()
@@ -76,23 +82,35 @@ class MainWindow(QMainWindow):
 
         self.validate_button = QPushButton("Validate & Save")
         self.validate_button.clicked.connect(self._on_validate_clicked)
+        self.validate_button.setProperty("variant", "primary")
 
         self.start_stop_button = QPushButton("Start")
         self.start_stop_button.setEnabled(False)
         self.start_stop_button.clicked.connect(self._on_start_stop_clicked)
+        self.start_stop_button.setProperty("variant", "primary")
 
         self.status_label = QLabel("STOPPED")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.status_label.setProperty("role", "pill")
 
         self.health_label = QLabel("OFFLINE")
         self.health_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.health_label.setProperty("role", "pill")
         self._set_health_state("offline", "Not running")
 
+        self.theme_selector = QComboBox()
+        self.theme_selector.addItems(["Dark", "Light"])
+        self.theme_selector.setFixedWidth(120)
+        self.theme_selector.setToolTip("Switch theme")
+
         top_row = QHBoxLayout()
+        top_row.setSpacing(10)
         top_row.addWidget(self.link_input, 1)
         top_row.addWidget(self.validate_button)
+        top_row.addWidget(self.theme_selector)
 
         control_row = QHBoxLayout()
+        control_row.setSpacing(10)
         control_row.addWidget(self.start_stop_button)
         control_row.addWidget(QLabel("Status:"))
         control_row.addWidget(self.status_label, 1)
@@ -102,6 +120,8 @@ class MainWindow(QMainWindow):
         self.diagnostics_widget = DiagnosticsWidget()
 
         layout = QVBoxLayout()
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
         layout.addLayout(top_row)
         layout.addLayout(control_row)
         layout.addWidget(self.diagnostics_widget, 1)
@@ -130,6 +150,8 @@ class MainWindow(QMainWindow):
         self._status_timer.timeout.connect(self._poll_core_status)
 
         self._load_profile()
+        self._apply_theme(self._theme, persist=False)
+        self.theme_selector.currentTextChanged.connect(self._on_theme_changed)
 
     def _on_validate_clicked(self) -> None:
         self.status_label.setText("STOPPED")
@@ -148,7 +170,12 @@ class MainWindow(QMainWindow):
             save_json(config_path, config)
 
             profile_path = get_config_dir() / PROFILE_FILE
-            save_json(profile_path, {"link": raw_link})
+            profile = load_json(profile_path, {})
+            if not isinstance(profile, dict):
+                profile = {}
+            profile["link"] = raw_link
+            profile["theme"] = self._theme
+            save_json(profile_path, profile)
 
             xray = find_xray_binary()
             validate_xray_config(xray, config_path)
@@ -202,6 +229,8 @@ class MainWindow(QMainWindow):
 
         self.status_label.setText("RUNNING")
         self.start_stop_button.setText("Stop")
+        self.start_stop_button.setProperty("variant", "danger")
+        self._refresh_style(self.start_stop_button)
         self.link_input.setEnabled(False)
         self.validate_button.setEnabled(False)
         self._health_token += 1
@@ -222,6 +251,8 @@ class MainWindow(QMainWindow):
         self._status_timer.stop()
         self.status_label.setText("STOPPED")
         self.start_stop_button.setText("Start")
+        self.start_stop_button.setProperty("variant", "primary")
+        self._refresh_style(self.start_stop_button)
         self.link_input.setEnabled(True)
         self.validate_button.setEnabled(True)
         self._health_timer.stop()
@@ -245,6 +276,8 @@ class MainWindow(QMainWindow):
 
         self.status_label.setText("STOPPED")
         self.start_stop_button.setText("Start")
+        self.start_stop_button.setProperty("variant", "primary")
+        self._refresh_style(self.start_stop_button)
         self.link_input.setEnabled(True)
         self.validate_button.setEnabled(True)
         self._set_health_state("offline", "Not running")
@@ -257,6 +290,38 @@ class MainWindow(QMainWindow):
             link = data.get("link")
             if isinstance(link, str) and link.strip():
                 self.link_input.setText(link)
+            self._theme = normalize_theme(data.get("theme"))
+            self.theme_selector.setCurrentText(theme_display_name(self._theme))
+
+    def _on_theme_changed(self, value: str) -> None:
+        self._apply_theme(normalize_theme(value), persist=True)
+
+    def _apply_theme(self, theme: ThemeName, *, persist: bool) -> None:
+        self._theme = theme
+        app = QApplication.instance()
+        if app is not None:
+            apply_theme(app, theme)
+
+        if persist:
+            profile_path = get_config_dir() / PROFILE_FILE
+            data = load_json(profile_path, {})
+            if not isinstance(data, dict):
+                data = {}
+            data["theme"] = theme
+            save_json(profile_path, data)
+
+        self.theme_selector.blockSignals(True)
+        self.theme_selector.setCurrentText(theme_display_name(theme))
+        self.theme_selector.blockSignals(False)
+
+        for widget in (self.validate_button, self.start_stop_button, self.theme_selector):
+            self._refresh_style(widget)
+
+    def _refresh_style(self, widget) -> None:
+        style = widget.style()
+        style.unpolish(widget)
+        style.polish(widget)
+        widget.update()
 
     def _pick_proxy_ports(self) -> tuple[int, int]:
         socks_port = DEFAULT_SOCKS_PORT

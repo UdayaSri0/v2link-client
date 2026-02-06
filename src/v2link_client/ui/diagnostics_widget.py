@@ -53,6 +53,7 @@ class DiagnosticsWidget(QWidget):
         self._http_port = 8080
 
         self.hint_label = QLabel("")
+        self.hint_label.setProperty("role", "hint")
         self.hint_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         self.text_area = QTextEdit()
@@ -70,6 +71,7 @@ class DiagnosticsWidget(QWidget):
         self.copy_manual_button.clicked.connect(self.copy_manual_proxy)
 
         button_row = QHBoxLayout()
+        button_row.setSpacing(8)
         button_row.addWidget(self.refresh_button)
         button_row.addWidget(self.copy_button)
         button_row.addWidget(self.open_logs_button)
@@ -77,6 +79,8 @@ class DiagnosticsWidget(QWidget):
         button_row.addStretch(1)
 
         layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
         layout.addWidget(self.hint_label)
         layout.addLayout(button_row)
         layout.addWidget(self.text_area, 1)
