@@ -27,9 +27,14 @@ def test_health_check_success(monkeypatch) -> None:
 
     monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
 
-    result = check_http_proxy("127.0.0.1", 8080, urls=("https://example.com",))
+    result = check_http_proxy(
+        "127.0.0.1",
+        8080,
+        http_urls=("http://example.com",),
+        https_urls=("https://example.com",),
+    )
     assert isinstance(result, ProxyHealthResult)
-    assert result.ok is True
+    assert result.state == "online"
     assert result.status_code == 204
     assert result.checked_url == "https://example.com"
     assert result.error is None
@@ -49,9 +54,14 @@ def test_health_check_tries_fallback_urls(monkeypatch) -> None:
 
     monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
 
-    result = check_http_proxy("127.0.0.1", 8080, urls=("https://t/a", "https://t/b"))
-    assert result.ok is True
-    assert calls == ["https://t/a", "https://t/b"]
+    result = check_http_proxy(
+        "127.0.0.1",
+        8080,
+        http_urls=("http://t/a", "http://t/b"),
+        https_urls=("https://t/c",),
+    )
+    assert result.state == "online"
+    assert calls == ["http://t/a", "http://t/b", "https://t/c"]
 
 
 def test_health_check_failure(monkeypatch) -> None:
@@ -63,7 +73,29 @@ def test_health_check_failure(monkeypatch) -> None:
 
     monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
 
-    result = check_http_proxy("127.0.0.1", 8080, urls=("https://example.com",))
-    assert result.ok is False
+    result = check_http_proxy(
+        "127.0.0.1", 8080, http_urls=("http://example.com",), https_urls=("https://example.com",)
+    )
+    assert result.state == "offline"
     assert "refused" in (result.error or "").lower()
 
+
+def test_health_check_degraded_http_ok_https_fail(monkeypatch) -> None:
+    def fake_open(req, timeout):
+        if req.full_url.startswith("https://"):
+            raise OSError("tls failed")
+        return _FakeResponse(204)
+
+    def fake_build_opener(_handler):
+        return types.SimpleNamespace(open=fake_open)
+
+    monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
+
+    result = check_http_proxy(
+        "127.0.0.1",
+        8080,
+        http_urls=("http://example.com",),
+        https_urls=("https://example.com",),
+    )
+    assert result.state == "degraded"
+    assert "HTTP ok" in (result.error or "")

@@ -169,10 +169,14 @@ class MainWindow(QMainWindow):
             socks_port=self._socks_port, http_port=self._http_port
         )
         self.start_stop_button.setEnabled(True)
-        self.diagnostics_widget.set_hint(
+        hint = (
             f"Validated: {parsed_link.display_name()}. "
             f"Ready to start (SOCKS5 {DEFAULT_LISTEN}:{self._socks_port}, HTTP {DEFAULT_LISTEN}:{self._http_port})."
         )
+        warning = self._validation_warning(parsed_link)
+        if warning:
+            hint = f"{hint}  Warning: {warning}"
+        self.diagnostics_widget.set_hint(hint)
         self._set_health_state("offline", "Not running")
 
     def _on_start_stop_clicked(self) -> None:
@@ -273,6 +277,21 @@ class MainWindow(QMainWindow):
 
         return socks_port, http_port
 
+    def _validation_warning(self, link) -> str | None:
+        if getattr(link, "security", None) != "tls":
+            return None
+        if bool(getattr(link, "allow_insecure", False)):
+            return None
+
+        host = str(getattr(link, "host", "") or "")
+        sni = getattr(link, "sni", None)
+        if sni and host and sni != host:
+            return (
+                "TLS SNI differs from host. With allowInsecure=0 the certificate must match SNI. "
+                "If connectivity fails, try removing `sni` or setting it to the host."
+            )
+        return None
+
     def _kick_health_check(self) -> None:
         if self._health_in_flight:
             return
@@ -301,13 +320,15 @@ class MainWindow(QMainWindow):
             self._set_health_state("offline", "Health check error")
             return
 
-        if result.ok:
+        if result.state == "online":
             latency = f"{result.latency_ms} ms" if result.latency_ms is not None else "ok"
             self._set_health_state("online", latency)
+        elif result.state == "degraded":
+            self._set_health_state("degraded", result.error or "Degraded")
         else:
             self._set_health_state("offline", result.error or "Offline")
 
-        ok_now = bool(result.ok)
+        ok_now = result.state == "online"
         if self._last_health_ok is True and not ok_now:
             self.diagnostics_widget.set_hint(
                 f"Connectivity went offline: {result.error or 'unknown error'}"
@@ -331,6 +352,9 @@ class MainWindow(QMainWindow):
         elif state == "connecting":
             self.health_label.setText(f"CONNECTING ({detail_short})")
             self.health_label.setStyleSheet("color: #546e7a; font-weight: 600;")
+        elif state == "degraded":
+            self.health_label.setText(f"DEGRADED ({detail_short})")
+            self.health_label.setStyleSheet("color: #ef6c00; font-weight: 600;")
         else:
             self.health_label.setText(f"OFFLINE ({detail_short})")
             self.health_label.setStyleSheet("color: #c62828; font-weight: 600;")
