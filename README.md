@@ -133,4 +133,6 @@ Udaya Sri
 
 ## License
 
-TBD.
+MIT License
+
+Copyright (c) 2026 Udaya Sri
