@@ -30,8 +30,42 @@ Current status: **early beta** — the app currently supports **`vless://`** lin
 ## Requirements (runtime)
 
 - Linux desktop (GNOME/KDE/etc.)
-- Python **3.11+**
 - **Xray-core** available in your `PATH` (`xray version` should work)
+
+## Installation (download release)
+
+1) Open GitHub Releases and download the latest `*.AppImage` file.
+
+2) Make it executable and run it:
+
+```bash
+chmod +x v2link-client-*.AppImage
+./v2link-client-*.AppImage
+```
+
+3) (Optional) Add launcher entry:
+
+```bash
+mkdir -p ~/.local/bin
+cp v2link-client-*.AppImage ~/.local/bin/v2link-client.AppImage
+chmod +x ~/.local/bin/v2link-client.AppImage
+```
+
+Create `~/.local/share/applications/v2link-client.desktop`:
+
+```ini
+[Desktop Entry]
+Name=v2link-client
+Exec=/home/YOUR_USER/.local/bin/v2link-client.AppImage
+Icon=v2link-client
+Type=Application
+Categories=Network;
+Terminal=false
+```
+
+Replace `YOUR_USER` with your Linux username.
+
+If `xray version` fails, install Xray-core first and re-run the app.
 
 ## Installation (run from source)
 
@@ -64,6 +98,27 @@ pip install -r requirements.txt
 ```bash
 ./scripts/dev_run.sh
 ```
+
+## Release process (maintainers)
+
+Build artifacts locally:
+
+```bash
+./scripts/build_release.sh
+```
+
+Outputs are written to `dist/`:
+- `v2link-client-<version>-linux-<arch>.AppImage`
+- `SHA256SUMS`
+
+Publish on GitHub:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Tag pushes matching `v*` trigger `.github/workflows/release.yml`, which builds the AppImage and uploads assets to the GitHub Release automatically.
 
 ## Usage
 
