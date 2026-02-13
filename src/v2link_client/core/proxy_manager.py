@@ -16,6 +16,7 @@ import ast
 import logging
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 from typing import Final, Literal
 
@@ -81,16 +82,24 @@ def _gsettings_available() -> bool:
 
 _GSETTINGS_KEYS: Final[list[tuple[str, str]]] = [
     ("org.gnome.system.proxy", "mode"),
+    ("org.gnome.system.proxy", "autoconfig-url"),
     ("org.gnome.system.proxy", "ignore-hosts"),
     ("org.gnome.system.proxy", "use-same-proxy"),
+    ("org.gnome.system.proxy.ftp", "host"),
+    ("org.gnome.system.proxy.ftp", "port"),
     ("org.gnome.system.proxy.http", "enabled"),
     ("org.gnome.system.proxy.http", "host"),
     ("org.gnome.system.proxy.http", "port"),
+    ("org.gnome.system.proxy.http", "authentication-user"),
+    ("org.gnome.system.proxy.http", "authentication-password"),
+    ("org.gnome.system.proxy.http", "use-authentication"),
     ("org.gnome.system.proxy.https", "host"),
     ("org.gnome.system.proxy.https", "port"),
     ("org.gnome.system.proxy.socks", "host"),
     ("org.gnome.system.proxy.socks", "port"),
 ]
+
+_DEFAULT_IGNORE_HOSTS: Final[list[str]] = ["localhost", "127.0.0.0/8", "::1"]
 
 
 def _gsettings_get(schema: str, key: str) -> str:
@@ -129,6 +138,69 @@ def _parse_gsettings_str_list(raw: str) -> list[str]:
     return out
 
 
+def _parse_gsettings_str(raw: str) -> str:
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = ast.literal_eval(raw)
+    except Exception:
+        parsed = None
+    if isinstance(parsed, str):
+        return parsed.strip()
+    if raw.startswith("'") and raw.endswith("'") and len(raw) >= 2:
+        return raw[1:-1].strip()
+    return raw
+
+
+def _parse_gsettings_bool(raw: str) -> bool:
+    raw = (raw or "").strip().lower()
+    if raw == "true":
+        return True
+    if raw == "false":
+        return False
+    try:
+        parsed = ast.literal_eval(raw)
+    except Exception:
+        return False
+    return bool(parsed) if isinstance(parsed, bool) else False
+
+
+def _parse_gsettings_int(raw: str, *, default: int = 0) -> int:
+    try:
+        return int((raw or "").strip())
+    except ValueError:
+        return default
+
+
+def _normalize_proxy_mode(raw: str) -> str:
+    return _parse_gsettings_str(raw).strip().lower()
+
+
+def _merge_ignore_hosts(*sources: list[str]) -> list[str]:
+    merged: list[str] = []
+    for source in sources:
+        for item in source:
+            host = (item or "").strip()
+            if not host or host in merged:
+                continue
+            merged.append(host)
+    return merged
+
+
+def _is_loopback_host(host: str) -> bool:
+    return host.strip().lower() in {"127.0.0.1", "localhost", "::1"}
+
+
+def _is_tcp_endpoint_reachable(host: str, port: int, *, timeout_s: float = 0.25) -> bool:
+    try:
+        sock = socket.create_connection((host, int(port)), timeout=timeout_s)
+    except OSError:
+        return False
+    sock.close()
+    return True
+
+
 def _gsettings_snapshot() -> dict[str, str]:
     snap: dict[str, str] = {}
     for schema, key in _GSETTINGS_KEYS:
@@ -153,13 +225,7 @@ def _gsettings_restore(snapshot: dict[str, str]) -> None:
 def _gsettings_apply(cfg: SystemProxyConfig) -> None:
     # Merge bypass list with existing ignore-hosts.
     existing = _parse_gsettings_str_list(_gsettings_get("org.gnome.system.proxy", "ignore-hosts"))
-    merged: list[str] = []
-    for item in existing + list(cfg.bypass_hosts or []):
-        item = (item or "").strip()
-        if not item:
-            continue
-        if item not in merged:
-            merged.append(item)
+    merged = _merge_ignore_hosts(existing, list(cfg.bypass_hosts or []), _DEFAULT_IGNORE_HOSTS)
 
     # Set per-protocol first, then switch mode to manual last.
     _gsettings_set("org.gnome.system.proxy.http", "enabled", "true")
@@ -172,6 +238,32 @@ def _gsettings_apply(cfg: SystemProxyConfig) -> None:
     _gsettings_set("org.gnome.system.proxy", "use-same-proxy", "true")
     _gsettings_set("org.gnome.system.proxy", "ignore-hosts", _format_gsettings_str_list(merged))
     _gsettings_set("org.gnome.system.proxy", "mode", "'manual'")
+
+
+def _gsettings_force_no_proxy(*, ignore_hosts: list[str] | None = None) -> None:
+    # Canonical no-proxy state. Some app stacks read per-protocol keys even when
+    # mode is "none", so we normalize all related values.
+    existing = ignore_hosts
+    if existing is None:
+        existing = _parse_gsettings_str_list(_gsettings_get("org.gnome.system.proxy", "ignore-hosts"))
+    merged = _merge_ignore_hosts(existing, _DEFAULT_IGNORE_HOSTS)
+
+    _gsettings_set("org.gnome.system.proxy", "autoconfig-url", _format_gsettings_str(""))
+    _gsettings_set("org.gnome.system.proxy.http", "enabled", "false")
+    _gsettings_set("org.gnome.system.proxy.http", "host", _format_gsettings_str(""))
+    _gsettings_set("org.gnome.system.proxy.http", "port", "0")
+    _gsettings_set("org.gnome.system.proxy.http", "authentication-user", _format_gsettings_str(""))
+    _gsettings_set("org.gnome.system.proxy.http", "authentication-password", _format_gsettings_str(""))
+    _gsettings_set("org.gnome.system.proxy.http", "use-authentication", "false")
+    _gsettings_set("org.gnome.system.proxy.https", "host", _format_gsettings_str(""))
+    _gsettings_set("org.gnome.system.proxy.https", "port", "0")
+    _gsettings_set("org.gnome.system.proxy.socks", "host", _format_gsettings_str(""))
+    _gsettings_set("org.gnome.system.proxy.socks", "port", "0")
+    _gsettings_set("org.gnome.system.proxy.ftp", "host", _format_gsettings_str(""))
+    _gsettings_set("org.gnome.system.proxy.ftp", "port", "0")
+    _gsettings_set("org.gnome.system.proxy", "use-same-proxy", "false")
+    _gsettings_set("org.gnome.system.proxy", "ignore-hosts", _format_gsettings_str_list(merged))
+    _gsettings_set("org.gnome.system.proxy", "mode", "'none'")
 
 
 class SystemProxyManager:
@@ -234,6 +326,22 @@ class SystemProxyManager:
                 logger.exception("Failed to rollback system proxy settings")
             raise
 
+    def force_no_proxy(self, *, ignore_hosts: list[str] | None = None) -> None:
+        if self._backend is None:
+            if _gsettings_available():
+                self._backend = "gsettings"
+            else:
+                raise ProxyApplyError(
+                    "System proxy backend unavailable",
+                    user_message="System proxy backend unavailable; can't force no-proxy.",
+                )
+        if self._backend != "gsettings":
+            raise ProxyApplyError(
+                f"Unsupported system proxy backend: {self._backend}",
+                user_message="System proxy force-no-proxy is not supported on this desktop yet.",
+            )
+        _gsettings_force_no_proxy(ignore_hosts=ignore_hosts)
+
     def restore(self) -> None:
         data = load_json(self.snapshot_path, None)
         if not isinstance(data, dict):
@@ -250,9 +358,47 @@ class SystemProxyManager:
             # If the current session can't access gsettings, we still try.
             self._backend = "gsettings"
 
-        _gsettings_restore({str(k): str(v) for k, v in snapshot.items()})
+        normalized_snapshot = {str(k): str(v) for k, v in snapshot.items()}
+        expected_mode = _normalize_proxy_mode(normalized_snapshot.get("org.gnome.system.proxy:mode", ""))
+        if expected_mode == "none":
+            snap_hosts = _parse_gsettings_str_list(
+                normalized_snapshot.get("org.gnome.system.proxy:ignore-hosts", "")
+            )
+            self.force_no_proxy(ignore_hosts=snap_hosts)
+        else:
+            _gsettings_restore(normalized_snapshot)
+
+        if expected_mode:
+            current_mode = _normalize_proxy_mode(_gsettings_get("org.gnome.system.proxy", "mode"))
+            if current_mode != expected_mode:
+                raise ProxyApplyError(
+                    f"Proxy restore mode mismatch: expected={expected_mode!r}, got={current_mode!r}",
+                    user_message="System proxy restore verification failed.",
+                )
         try:
             self.snapshot_path.unlink()
         except OSError:
             logger.exception("Failed to remove system proxy snapshot: %s", self.snapshot_path)
 
+    def repair_stale_loopback_proxy(self) -> bool:
+        if self.snapshot_path.exists() or self._backend != "gsettings":
+            return False
+
+        mode = _normalize_proxy_mode(_gsettings_get("org.gnome.system.proxy", "mode"))
+        if mode != "manual":
+            return False
+
+        if not _parse_gsettings_bool(_gsettings_get("org.gnome.system.proxy", "use-same-proxy")):
+            return False
+
+        host = _parse_gsettings_str(_gsettings_get("org.gnome.system.proxy.http", "host"))
+        port = _parse_gsettings_int(_gsettings_get("org.gnome.system.proxy.http", "port"))
+        if not _is_loopback_host(host) or port <= 0:
+            return False
+
+        if _is_tcp_endpoint_reachable(host, port, timeout_s=0.25):
+            return False
+
+        ignore_hosts = _parse_gsettings_str_list(_gsettings_get("org.gnome.system.proxy", "ignore-hosts"))
+        self.force_no_proxy(ignore_hosts=ignore_hosts)
+        return True

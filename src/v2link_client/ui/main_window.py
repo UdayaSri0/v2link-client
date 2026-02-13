@@ -227,6 +227,14 @@ class MainWindow(QMainWindow):
                 logger.info("Restored system proxy from previous session")
         except Exception:
             logger.exception("Failed to restore system proxy from previous session")
+        try:
+            if self._system_proxy.repair_stale_loopback_proxy():
+                logger.info("Repaired stale loopback proxy settings from previous session")
+                self.diagnostics_widget.set_hint(
+                    "Detected stale system proxy settings and reset to no-proxy."
+                )
+        except Exception:
+            logger.exception("Failed to auto-repair stale loopback proxy settings")
 
     def _setup_menu(self) -> None:
         help_menu = self.menuBar().addMenu("&Help")
@@ -770,4 +778,9 @@ class MainWindow(QMainWindow):
             self._system_proxy.restore()
         except Exception:
             logger.exception("System proxy restore failed")
+            try:
+                self._system_proxy.force_no_proxy()
+                logger.warning("Applied no-proxy fallback after restore failure")
+            except Exception:
+                logger.exception("Failed to apply no-proxy fallback after restore failure")
         self._system_proxy_applied = False
