@@ -36,7 +36,6 @@ def test_build_xray_config_for_vless_tls(tmp_path) -> None:
     assert stream["tlsSettings"]["serverName"] == "aka.ms"
     assert stream["tlsSettings"]["allowInsecure"] is False
     assert stream["tlsSettings"]["fingerprint"] == "chrome"
-    assert stream["tlsSettings"]["verifyPeerCertInNames"] == ["aka.ms", "prime.example.com"]
     assert stream["tlsSettings"]["verifyPeerCertByName"] == "aka.ms,prime.example.com"
 
 

@@ -31,14 +31,26 @@ def _default_gsettings_state() -> dict[tuple[str, str], str]:
     }
 
 
+@pytest.fixture(autouse=True)
+def _disable_gio_backend(monkeypatch) -> None:
+    monkeypatch.setattr(pm, "_gio_available", lambda: False)
+
+
 def _fake_run_factory(
     state: dict[tuple[str, str], str],
     calls: list[list[str]],
+    *,
+    ignore_manual_mode_set: bool = False,
 ):
     def fake_run(cmd, check, capture_output, text, timeout):  # noqa: ANN001
         calls.append(list(cmd))
-        if cmd[:3] == ["gsettings", "list-keys", "org.gnome.system.proxy"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="mode\nignore-hosts\n", stderr="")
+
+        if cmd[:2] == ["gsettings", "list-keys"] and len(cmd) == 3:
+            schema = cmd[2]
+            keys = sorted({k for (s, k) in state if s == schema})
+            if not keys:
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="missing schema")
+            return subprocess.CompletedProcess(cmd, 0, stdout="\n".join(keys) + "\n", stderr="")
 
         if cmd[:2] == ["gsettings", "get"]:
             key = (cmd[2], cmd[3])
@@ -47,7 +59,10 @@ def _fake_run_factory(
             return subprocess.CompletedProcess(cmd, 0, stdout=f"{state[key]}\n", stderr="")
 
         if cmd[:2] == ["gsettings", "set"]:
-            state[(cmd[2], cmd[3])] = cmd[4]
+            schema, key, value = cmd[2], cmd[3], cmd[4]
+            if ignore_manual_mode_set and schema == "org.gnome.system.proxy" and key == "mode" and value == "'manual'":
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            state[(schema, key)] = value
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
         raise AssertionError(f"Unexpected command: {cmd}")
@@ -74,12 +89,39 @@ def test_system_proxy_apply_unsupported_backend(tmp_path, monkeypatch) -> None:
         )
 
 
-def test_restore_mode_none_uses_canonical_no_proxy(tmp_path, monkeypatch) -> None:
+def test_apply_verification_detects_mode_mismatch(tmp_path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+    state = _default_gsettings_state()
+
+    monkeypatch.setattr(pm.shutil, "which", lambda _name: "/usr/bin/gsettings")
+    monkeypatch.setattr(
+        pm.subprocess,
+        "run",
+        _fake_run_factory(state, calls, ignore_manual_mode_set=True),
+    )
+
+    mgr = SystemProxyManager(state_dir=tmp_path)
+    with pytest.raises(ProxyApplyError) as exc_info:
+        mgr.apply(
+            SystemProxyConfig(
+                http_host="127.0.0.1",
+                http_port=8080,
+                socks_host="127.0.0.1",
+                socks_port=1080,
+                bypass_hosts=["localhost", "127.0.0.0/8", "::1"],
+            )
+        )
+
+    assert "not applied correctly" in exc_info.value.user_message
+
+
+def test_restore_mode_none_restores_exact_snapshot_state(tmp_path, monkeypatch) -> None:
     calls: list[list[str]] = []
     state = _default_gsettings_state()
     state[("org.gnome.system.proxy", "ignore-hosts")] = "['corp.local']"
     state[("org.gnome.system.proxy", "use-same-proxy")] = "true"
     state[("org.gnome.system.proxy.http", "port")] = "8080"
+    initial_state = dict(state)
 
     monkeypatch.setattr(pm.shutil, "which", lambda _name: "/usr/bin/gsettings")
     monkeypatch.setattr(pm.subprocess, "run", _fake_run_factory(state, calls))
@@ -101,16 +143,11 @@ def test_restore_mode_none_uses_canonical_no_proxy(tmp_path, monkeypatch) -> Non
     mgr.restore()
     assert not snap_path.exists()
 
-    assert state[("org.gnome.system.proxy", "mode")] == "'none'"
-    assert state[("org.gnome.system.proxy.http", "host")] == "''"
-    assert state[("org.gnome.system.proxy.http", "port")] == "0"
-    assert state[("org.gnome.system.proxy.https", "port")] == "0"
-    assert state[("org.gnome.system.proxy.socks", "port")] == "0"
-    assert state[("org.gnome.system.proxy.ftp", "port")] == "0"
-    assert state[("org.gnome.system.proxy", "use-same-proxy")] == "false"
-    assert "corp.local" in state[("org.gnome.system.proxy", "ignore-hosts")]
-    assert "127.0.0.0/8" in state[("org.gnome.system.proxy", "ignore-hosts")]
-    assert "::1" in state[("org.gnome.system.proxy", "ignore-hosts")]
+    assert state[("org.gnome.system.proxy", "mode")] == initial_state[("org.gnome.system.proxy", "mode")]
+    assert state[("org.gnome.system.proxy.http", "host")] == initial_state[("org.gnome.system.proxy.http", "host")]
+    assert state[("org.gnome.system.proxy.http", "port")] == initial_state[("org.gnome.system.proxy.http", "port")]
+    assert state[("org.gnome.system.proxy", "use-same-proxy")] == initial_state[("org.gnome.system.proxy", "use-same-proxy")]
+    assert state[("org.gnome.system.proxy", "ignore-hosts")] == initial_state[("org.gnome.system.proxy", "ignore-hosts")]
 
     restore_sets = _set_commands(calls)
     assert restore_sets[-1] == ["gsettings", "set", "org.gnome.system.proxy", "mode", "'none'"]
@@ -181,6 +218,45 @@ def test_restore_backward_compatible_with_old_snapshot_keys(tmp_path, monkeypatc
     mgr.restore()
     assert not snap_path.exists()
     assert state[("org.gnome.system.proxy", "mode")] == "'manual'"
+
+
+def test_restore_missing_snapshot_falls_back_to_no_proxy(tmp_path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+    state = _default_gsettings_state()
+    state[("org.gnome.system.proxy", "mode")] = "'manual'"
+    state[("org.gnome.system.proxy.http", "enabled")] = "true"
+    state[("org.gnome.system.proxy.http", "host")] = "'127.0.0.1'"
+    state[("org.gnome.system.proxy.http", "port")] = "8080"
+
+    monkeypatch.setattr(pm.shutil, "which", lambda _name: "/usr/bin/gsettings")
+    monkeypatch.setattr(pm.subprocess, "run", _fake_run_factory(state, calls))
+
+    mgr = SystemProxyManager(state_dir=tmp_path)
+    status = mgr.restore()
+
+    assert status.mode == "none"
+    assert state[("org.gnome.system.proxy", "mode")] == "'none'"
+    assert state[("org.gnome.system.proxy.http", "port")] == "0"
+
+
+def test_restore_corrupt_snapshot_falls_back_to_no_proxy(tmp_path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+    state = _default_gsettings_state()
+    state[("org.gnome.system.proxy", "mode")] = "'manual'"
+
+    monkeypatch.setattr(pm.shutil, "which", lambda _name: "/usr/bin/gsettings")
+    monkeypatch.setattr(pm.subprocess, "run", _fake_run_factory(state, calls))
+
+    snap_path = tmp_path / pm.SNAPSHOT_FILE
+    snap_path.parent.mkdir(parents=True, exist_ok=True)
+    snap_path.write_text("{not-json", encoding="utf-8")
+
+    mgr = SystemProxyManager(state_dir=tmp_path)
+    status = mgr.restore()
+
+    assert status.mode == "none"
+    assert state[("org.gnome.system.proxy", "mode")] == "'none'"
+    assert not snap_path.exists()
 
 
 def test_repair_stale_loopback_proxy_repairs(tmp_path, monkeypatch) -> None:

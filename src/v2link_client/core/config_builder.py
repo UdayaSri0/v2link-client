@@ -174,11 +174,10 @@ def _build_xray_stream_settings(link: VlessLink) -> dict[str, Any]:
         # verification when `serverName` is set to the SNI value.
         #
         # Xray supports overriding the hostname verification list while still
-        # sending the desired SNI via:
-        # - `verifyPeerCertInNames` (older)
-        # - `verifyPeerCertByName` (newer, comma-separated)
+        # sending the desired SNI via `verifyPeerCertByName` (comma-separated).
         #
-        # We set both for compatibility; unknown fields are ignored by Xray.
+        # Older `verifyPeerCertInNames` has been removed in newer Xray releases
+        # and can make config validation fail.
         if (
             not link.allow_insecure
             and link.sni
@@ -191,7 +190,6 @@ def _build_xray_stream_settings(link: VlessLink) -> dict[str, Any]:
                 if name and name not in verify_names:
                     verify_names.append(name)
             if verify_names:
-                tls_settings["verifyPeerCertInNames"] = verify_names
                 tls_settings["verifyPeerCertByName"] = ",".join(verify_names)
         if link.fingerprint:
             tls_settings["fingerprint"] = link.fingerprint
