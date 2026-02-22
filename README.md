@@ -167,6 +167,17 @@ What to try:
 - Remove `sni` or set it to the server host (or set `allowInsecure=1` if you understand the risk).
 - Check the logs via **Open logs folder**.
 
+### Qt fails with "Could not load the Qt platform plugin xcb"
+
+If startup fails with messages mentioning `xcb` and `libxcb-cursor`, install the missing runtime dependency:
+
+```bash
+sudo apt update
+sudo apt install -y libxcb-cursor0
+```
+
+Then run the app again.
+
 ## Development
 
 Developer deps:
