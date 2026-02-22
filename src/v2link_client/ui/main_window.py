@@ -52,6 +52,8 @@ logger = logging.getLogger(__name__)
 
 PROFILE_FILE = "profile.json"
 XRAY_CONFIG_FILE = "xray_config.json"
+PROFILE_KEY_APPLY_SYSTEM_PROXY = "apply_system_proxy"
+PROFILE_KEY_APPLY_SYSTEM_PROXY_EXPLICIT = "apply_system_proxy_explicit"
 
 HEALTH_INTERVAL_MS = 5000
 
@@ -101,6 +103,7 @@ class MainWindow(QMainWindow):
         self.system_proxy_checkbox.setToolTip(
             "Apply system proxy settings while running so most apps use the tunnel automatically."
         )
+        self.system_proxy_checkbox.setChecked(True)
 
         self.start_stop_button = QPushButton("Start")
         self.start_stop_button.setEnabled(False)
@@ -218,6 +221,7 @@ class MainWindow(QMainWindow):
         self._speed_test_in_flight = False
 
         self._load_profile()
+        self.system_proxy_checkbox.toggled.connect(self._on_system_proxy_toggled)
         self._apply_theme(self._theme, persist=False)
         self.theme_selector.currentTextChanged.connect(self._on_theme_changed)
 
@@ -284,7 +288,8 @@ class MainWindow(QMainWindow):
                 profile = {}
             profile["link"] = raw_link
             profile["theme"] = self._theme
-            profile["apply_system_proxy"] = bool(self.system_proxy_checkbox.isChecked())
+            profile[PROFILE_KEY_APPLY_SYSTEM_PROXY] = bool(self.system_proxy_checkbox.isChecked())
+            profile[PROFILE_KEY_APPLY_SYSTEM_PROXY_EXPLICIT] = True
             save_json(profile_path, profile)
 
             xray = find_xray_binary()
@@ -360,11 +365,18 @@ class MainWindow(QMainWindow):
         self._set_health_state("connecting", "Checking…")
         self._health_timer.start()
         self._kick_health_check()
-        self.diagnostics_widget.set_hint(
-            f"Started Xray. SOCKS5 {DEFAULT_LISTEN}:{self._socks_port} / HTTP {DEFAULT_LISTEN}:{self._http_port}"
+        base_hint = (
+            f"Started Xray. SOCKS5 {DEFAULT_LISTEN}:{self._socks_port} / "
+            f"HTTP {DEFAULT_LISTEN}:{self._http_port}"
         )
+        self.diagnostics_widget.set_hint(base_hint)
         if self.system_proxy_checkbox.isChecked():
             self._apply_system_proxy()
+        else:
+            self.diagnostics_widget.set_hint(
+                f"{base_hint}. System Proxy is OFF, so only apps configured to use these local "
+                "proxy ports will use the tunnel."
+            )
         self._status_timer.start()
 
     def _poll_core_status(self) -> None:
@@ -388,7 +400,7 @@ class MainWindow(QMainWindow):
         self._health_token += 1
         self._stats_token += 1
         self._set_health_state("offline", "Not running")
-        self._restore_system_proxy()
+        proxy_note = self._restore_system_proxy()
         self._core_started_at = None
         self._set_metrics_defaults()
 
@@ -396,6 +408,8 @@ class MainWindow(QMainWindow):
         hint = f"Core stopped{suffix}. Check logs for details."
         if self._process.stdout_path:
             hint = f"Core stopped{suffix}. Logs: {self._process.stdout_path}"
+        if proxy_note:
+            hint = f"{hint} {proxy_note}"
         self.diagnostics_widget.set_hint(hint)
 
     def _stop_core(self, *, user_message: str) -> None:
@@ -418,10 +432,13 @@ class MainWindow(QMainWindow):
         self.ping_button.setEnabled(True if self._validated_link is not None else False)
         self.speed_test_button.setEnabled(False)
         self._set_health_state("offline", "Not running")
-        self._restore_system_proxy()
+        proxy_note = self._restore_system_proxy()
         self._core_started_at = None
         self._set_metrics_defaults()
-        self.diagnostics_widget.set_hint(user_message)
+        if proxy_note:
+            self.diagnostics_widget.set_hint(f"{user_message} {proxy_note}")
+        else:
+            self.diagnostics_widget.set_hint(user_message)
 
     def _load_profile(self) -> None:
         profile_path = get_config_dir() / PROFILE_FILE
@@ -432,9 +449,39 @@ class MainWindow(QMainWindow):
                 self.link_input.setText(link)
             self._theme = normalize_theme(data.get("theme"))
             self.theme_selector.setCurrentText(theme_display_name(self._theme))
-            apply_system_proxy = data.get("apply_system_proxy")
-            if isinstance(apply_system_proxy, bool):
-                self.system_proxy_checkbox.setChecked(apply_system_proxy)
+            supported = self._system_proxy.is_supported()
+            apply_system_proxy = data.get(PROFILE_KEY_APPLY_SYSTEM_PROXY)
+            apply_system_proxy_explicit = data.get(PROFILE_KEY_APPLY_SYSTEM_PROXY_EXPLICIT)
+
+            changed = False
+            resolved_apply_system_proxy = supported
+
+            if isinstance(apply_system_proxy, bool) and isinstance(apply_system_proxy_explicit, bool):
+                resolved_apply_system_proxy = apply_system_proxy and supported
+            elif isinstance(apply_system_proxy, bool):
+                # Legacy profile migration: older versions persisted unchecked as a silent default.
+                resolved_apply_system_proxy = supported
+                data[PROFILE_KEY_APPLY_SYSTEM_PROXY] = resolved_apply_system_proxy
+                data[PROFILE_KEY_APPLY_SYSTEM_PROXY_EXPLICIT] = True
+                changed = True
+            else:
+                data[PROFILE_KEY_APPLY_SYSTEM_PROXY] = resolved_apply_system_proxy
+                data[PROFILE_KEY_APPLY_SYSTEM_PROXY_EXPLICIT] = True
+                changed = True
+
+            self.system_proxy_checkbox.setChecked(resolved_apply_system_proxy)
+
+            if changed:
+                save_json(profile_path, data)
+
+    def _on_system_proxy_toggled(self, checked: bool) -> None:
+        profile_path = get_config_dir() / PROFILE_FILE
+        data = load_json(profile_path, {})
+        if not isinstance(data, dict):
+            data = {}
+        data[PROFILE_KEY_APPLY_SYSTEM_PROXY] = bool(checked)
+        data[PROFILE_KEY_APPLY_SYSTEM_PROXY_EXPLICIT] = True
+        save_json(profile_path, data)
 
     def _on_theme_changed(self, value: str) -> None:
         self._apply_theme(normalize_theme(value), persist=True)
@@ -749,7 +796,7 @@ class MainWindow(QMainWindow):
             )
             return
         try:
-            self._system_proxy.apply(
+            status = self._system_proxy.apply(
                 SystemProxyConfig(
                     http_host=DEFAULT_LISTEN,
                     http_port=int(self._http_port),
@@ -768,19 +815,41 @@ class MainWindow(QMainWindow):
 
         self._system_proxy_applied = True
         self.diagnostics_widget.set_hint(
-            f"System proxy applied. Most apps should now use {DEFAULT_LISTEN}:{self._http_port} automatically."
+            "System proxy applied and verified: "
+            f"mode={status.mode}, "
+            f"http={status.http_host}:{status.http_port} (enabled={status.http_enabled}), "
+            f"socks={status.socks_host}:{status.socks_port}."
         )
 
-    def _restore_system_proxy(self) -> None:
+    def _restore_system_proxy(self) -> str | None:
         if not self._system_proxy_applied and not self._system_proxy.snapshot_path.exists():
-            return
+            return None
+        restore_note: str | None = None
         try:
-            self._system_proxy.restore()
-        except Exception:
+            status = self._system_proxy.restore()
+            restore_note = (
+                "System proxy restored: "
+                f"mode={status.mode}, "
+                f"http={status.http_host}:{status.http_port}, "
+                f"socks={status.socks_host}:{status.socks_port}."
+            )
+        except AppError as exc:
             logger.exception("System proxy restore failed")
             try:
-                self._system_proxy.force_no_proxy()
+                status = self._system_proxy.force_no_proxy()
                 logger.warning("Applied no-proxy fallback after restore failure")
-            except Exception:
+                restore_note = (
+                    f"System proxy restore failed ({exc.user_message}); "
+                    f"fallback applied: mode={status.mode}."
+                )
+            except Exception as fallback_exc:
                 logger.exception("Failed to apply no-proxy fallback after restore failure")
+                restore_note = (
+                    f"System proxy restore failed ({exc.user_message}); "
+                    f"fallback also failed: {fallback_exc}."
+                )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("System proxy restore failed")
+            restore_note = f"System proxy restore failed: {exc}."
         self._system_proxy_applied = False
+        return restore_note
