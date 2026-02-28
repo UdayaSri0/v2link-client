@@ -17,6 +17,8 @@ Current status: **early beta** — the app currently supports **`vless://`** lin
 ## Features
 
 - Paste a `vless://` link → validate → start/stop the core
+- Save multiple VPN URLs as named profiles (favorite/default supported)
+- Profile dropdown + manager dialog (add/edit/delete/duplicate/set default)
 - Ping server (TCP/TLS) + built-in speed test (through the tunnel)
 - Live session metrics: uptime, upload/download speed, total traffic used
 - Local proxy inbounds:
@@ -134,6 +136,26 @@ Notes:
 - The selected theme is saved in your profile and restored on next launch.
 - System proxy auto-apply currently targets GNOME/libproxy via `gsettings`. Other desktops may require manual proxy setup.
 
+## Saved Profiles (URLs)
+
+Saved Profiles let you store multiple VPN share links and quickly reuse them.
+
+- Create a profile:
+  - Paste a URL, click **Validate & Save**, then enter a profile name and save.
+  - If the URL already exists, the app offers **Update Profile** or **Save as New**.
+- Switch profiles:
+  - Use the **Profile** dropdown to load any saved profile URL into the input field.
+- Manage profiles:
+  - Click **Manage** next to the profile dropdown.
+  - From Profile Manager you can Add/Edit/Delete profiles, Set Default, Duplicate, and toggle Favorite.
+- Default profile:
+  - The default profile is auto-selected on app start and its URL is loaded automatically.
+- Storage location:
+  - `profiles.json` is stored at `$XDG_CONFIG_HOME/v2link-client/profiles.json`.
+  - If `XDG_CONFIG_HOME` is unset, fallback is `~/.config/v2link-client/profiles.json`.
+- Migration:
+  - On first launch after upgrading, an older single saved URL (from `profile.json`) is auto-imported as an `Imported Profile` and set as default.
+
 ## Supported link subset (today)
 
 `vless://` with:
@@ -144,11 +166,12 @@ Notes:
 
 Not supported yet:
 - `vmess://`, `trojan://`, `ss://`
-- REALITY, advanced XTLS options, complex routing rules, multiple profiles
+- REALITY, advanced XTLS options, complex routing rules
 
 ## Logs & data locations
 
-- Config/profile: `~/.config/v2link-client/profile.json`
+- Saved profiles: `$XDG_CONFIG_HOME/v2link-client/profiles.json` (fallback `~/.config/v2link-client/profiles.json`)
+- UI preferences + legacy compatibility: `~/.config/v2link-client/profile.json`
 - State + generated core config: `~/.local/state/v2link-client/`
 - Logs: `~/.local/state/v2link-client/logs/`
   - `app.log` (app logs)

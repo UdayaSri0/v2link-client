@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
+import tempfile
 import time
 
 from PyQt6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, pyqtSignal
@@ -11,6 +13,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -34,6 +37,7 @@ from v2link_client.core.health_check import ProxyHealthResult, check_http_proxy
 from v2link_client.core.humanize import format_bytes, format_duration_s, format_mbps
 from v2link_client.core.link_parser import parse_link
 from v2link_client.core.net_probe import ServerPingResult, ping_server
+from v2link_client.core.profile_store import Profile, ProfileStore
 from v2link_client.core.proxy_manager import SystemProxyConfig, SystemProxyManager
 from v2link_client.core.process_manager import (
     XrayProcessManager,
@@ -46,6 +50,7 @@ from v2link_client.core.speed_test import SpeedTestResult, run_speed_test_via_ht
 from v2link_client.core.storage import get_config_dir, get_state_dir, load_json, save_json
 from v2link_client.core.xray_api import TrafficStats, get_outbound_traffic
 from v2link_client.ui.diagnostics_widget import DiagnosticsWidget
+from v2link_client.ui.profile_dialogs import ProfileEditorDialog, ProfileManagerDialog
 from v2link_client.ui.theme import ThemeName, apply_theme, normalize_theme, theme_display_name
 
 logger = logging.getLogger(__name__)
@@ -54,6 +59,7 @@ PROFILE_FILE = "profile.json"
 XRAY_CONFIG_FILE = "xray_config.json"
 PROFILE_KEY_APPLY_SYSTEM_PROXY = "apply_system_proxy"
 PROFILE_KEY_APPLY_SYSTEM_PROXY_EXPLICIT = "apply_system_proxy_explicit"
+PROFILE_KEY_PROFILES_MIGRATED = "profiles_migrated_v1"
 
 HEALTH_INTERVAL_MS = 5000
 
@@ -95,6 +101,14 @@ class MainWindow(QMainWindow):
         self.link_input = QLineEdit()
         self.link_input.setPlaceholderText("Paste a vless:// link")
 
+        self.profile_selector = QComboBox()
+        self.profile_selector.setMinimumWidth(260)
+        self.profile_selector.setToolTip("Select a saved profile")
+
+        self.manage_profiles_button = QPushButton("Manage")
+        self.manage_profiles_button.clicked.connect(self._on_manage_profiles_clicked)
+        self.manage_profiles_button.setProperty("variant", "ghost")
+
         self.validate_button = QPushButton("Validate & Save")
         self.validate_button.clicked.connect(self._on_validate_clicked)
         self.validate_button.setProperty("variant", "primary")
@@ -133,6 +147,12 @@ class MainWindow(QMainWindow):
         self.theme_selector.addItems(["Dark", "Light"])
         self.theme_selector.setFixedWidth(120)
         self.theme_selector.setToolTip("Switch theme")
+
+        profile_row = QHBoxLayout()
+        profile_row.setSpacing(10)
+        profile_row.addWidget(QLabel("Profile"))
+        profile_row.addWidget(self.profile_selector, 1)
+        profile_row.addWidget(self.manage_profiles_button)
 
         top_row = QHBoxLayout()
         top_row.setSpacing(10)
@@ -174,6 +194,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout()
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
+        layout.addLayout(profile_row)
         layout.addLayout(top_row)
         layout.addLayout(control_row)
         layout.addLayout(metrics_row)
@@ -191,6 +212,9 @@ class MainWindow(QMainWindow):
             socks_port=self._socks_port, http_port=self._http_port
         )
         self._thread_pool = QThreadPool.globalInstance()
+        self._profile_store = ProfileStore()
+        self._selected_profile_id: str | None = None
+        self._profile_selector_syncing = False
 
         self._system_proxy = SystemProxyManager()
         self._system_proxy_applied = False
@@ -220,7 +244,9 @@ class MainWindow(QMainWindow):
         self._ping_in_flight = False
         self._speed_test_in_flight = False
 
-        self._load_profile()
+        profile_data = self._load_profile()
+        self._load_saved_profiles(profile_data)
+        self.profile_selector.currentIndexChanged.connect(self._on_profile_selected)
         self.system_proxy_checkbox.toggled.connect(self._on_system_proxy_toggled)
         self._apply_theme(self._theme, persist=False)
         self.theme_selector.currentTextChanged.connect(self._on_theme_changed)
@@ -252,11 +278,71 @@ class MainWindow(QMainWindow):
             f"Version: {__version__}<br>"
             f"Author: {__author__}<br><br>"
             "Linux desktop client for V2Ray-style links (VLESS) built with Python + PyQt6.<br>"
-            "Powered by Xray-core."
+            "Powered by Xray-core.<br><br>"
+            "<b>What's New</b><br>"
+            "• Save multiple VPN URLs as profiles<br>"
+            "• Quickly switch profiles from dropdown<br>"
+            "• Manage profiles (edit/delete/default)<br>"
+            "• Safer config saving with atomic writes"
         )
         QMessageBox.about(self, "About v2link-client", text)
 
     def _on_validate_clicked(self) -> None:
+        self._reset_validation_state()
+        raw_link = self.link_input.text().strip()
+
+        try:
+            parsed_link, config_path, xray, socks_port, http_port, api_port = self._validate_link(
+                raw_link, persist_runtime_config=True
+            )
+        except AppError as exc:
+            self.diagnostics_widget.set_hint(exc.user_message)
+            return
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("Validation failed")
+            self.diagnostics_widget.set_hint(f"Validation failed: {exc}")
+            return
+
+        saved_profile = self._handle_profile_save_after_validation(raw_link, parsed_link)
+        if saved_profile is not None:
+            self._selected_profile_id = saved_profile.id
+            self._refresh_profile_selector(select_profile_id=saved_profile.id)
+        else:
+            existing = self._profile_store.find_by_url(raw_link)
+            if existing is not None:
+                self._selected_profile_id = existing.id
+                self._refresh_profile_selector(select_profile_id=existing.id)
+
+        self._save_profile_preferences(link=raw_link)
+        self._process = XrayProcessManager(xray)
+        self._validated_config_path = config_path
+        self._validated_link = parsed_link
+        self._socks_port = socks_port
+        self._http_port = http_port
+        self._api_port = api_port
+        self.diagnostics_widget.set_proxy_ports(
+            socks_port=self._socks_port, http_port=self._http_port
+        )
+        self.start_stop_button.setEnabled(True)
+        self.ping_button.setEnabled(True)
+
+        hint = (
+            f"Validated: {parsed_link.display_name()}. "
+            f"Ready to start (SOCKS5 {DEFAULT_LISTEN}:{self._socks_port}, HTTP {DEFAULT_LISTEN}:{self._http_port})."
+        )
+        warning = self._validation_warning(parsed_link)
+        if warning:
+            hint = f"{hint}  Warning: {warning}"
+        if saved_profile is not None:
+            hint = f"{hint} Profile saved: {saved_profile.name}."
+        elif self._profile_store.find_by_url(raw_link) is not None:
+            hint = f"{hint} Using existing saved profile."
+        else:
+            hint = f"{hint} URL validated but not saved as a profile."
+        self.diagnostics_widget.set_hint(hint)
+        self._set_health_state("offline", "Not running")
+
+    def _reset_validation_state(self) -> None:
         self.status_label.setText("STOPPED")
         self._validated_config_path = None
         self._validated_link = None
@@ -272,56 +358,123 @@ class MainWindow(QMainWindow):
         self._last_downlink = None
         self._set_metrics_defaults()
 
-        raw_link = self.link_input.text()
-        try:
-            parsed_link = parse_link(raw_link)
-            socks_port, http_port, api_port = self._pick_proxy_ports()
-            config = build_xray_config(
-                parsed_link, socks_port=socks_port, http_port=http_port, api_port=api_port
-            )
+    def _validate_link(
+        self, raw_link: str, *, persist_runtime_config: bool
+    ) -> tuple[object, Path, object, int, int, int]:
+        parsed_link = parse_link(raw_link)
+        socks_port, http_port, api_port = self._pick_proxy_ports()
+        config = build_xray_config(
+            parsed_link, socks_port=socks_port, http_port=http_port, api_port=api_port
+        )
+
+        if persist_runtime_config:
             config_path = get_state_dir() / XRAY_CONFIG_FILE
             save_json(config_path, config)
+        else:
+            with tempfile.NamedTemporaryFile(
+                prefix="xray_validate_",
+                suffix=".json",
+                dir=str(get_state_dir()),
+                delete=False,
+            ) as handle:
+                config_path = Path(handle.name)
+            save_json(config_path, config)
 
-            profile_path = get_config_dir() / PROFILE_FILE
-            profile = load_json(profile_path, {})
-            if not isinstance(profile, dict):
-                profile = {}
-            profile["link"] = raw_link
-            profile["theme"] = self._theme
-            profile[PROFILE_KEY_APPLY_SYSTEM_PROXY] = bool(self.system_proxy_checkbox.isChecked())
-            profile[PROFILE_KEY_APPLY_SYSTEM_PROXY_EXPLICIT] = True
-            save_json(profile_path, profile)
-
-            xray = find_xray_binary()
+        xray = find_xray_binary()
+        try:
             validate_xray_config(xray, config_path)
-        except AppError as exc:
-            self.diagnostics_widget.set_hint(exc.user_message)
-            return
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.exception("Validation failed")
-            self.diagnostics_widget.set_hint(f"Validation failed: {exc}")
-            return
+        except Exception:
+            if not persist_runtime_config:
+                try:
+                    config_path.unlink(missing_ok=True)
+                except Exception:
+                    logger.exception("Failed to clean temporary validation config")
+            raise
 
-        self._process = XrayProcessManager(xray)
-        self._validated_config_path = config_path
-        self._validated_link = parsed_link
-        self._socks_port = socks_port
-        self._http_port = http_port
-        self._api_port = api_port
-        self.diagnostics_widget.set_proxy_ports(
-            socks_port=self._socks_port, http_port=self._http_port
+        if not persist_runtime_config:
+            try:
+                config_path.unlink(missing_ok=True)
+            except Exception:
+                logger.exception("Failed to clean temporary validation config")
+
+        return parsed_link, config_path, xray, socks_port, http_port, api_port
+
+    def _validate_link_for_dialog(self, raw_link: str) -> tuple[bool, str]:
+        try:
+            parsed_link, _, _, _, _, _ = self._validate_link(raw_link, persist_runtime_config=False)
+        except AppError as exc:
+            return False, exc.user_message
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("Validation failed in profile dialog")
+            return False, f"Validation failed: {exc}"
+        return True, f"Valid: {parsed_link.display_name()}"
+
+    def _handle_profile_save_after_validation(self, raw_link: str, parsed_link) -> Profile | None:
+        existing = self._profile_store.find_by_url(raw_link)
+        if existing is not None:
+            chooser = QMessageBox(self)
+            chooser.setIcon(QMessageBox.Icon.Question)
+            chooser.setWindowTitle("URL Already Saved")
+            chooser.setText(
+                f"This URL is already saved in profile '{existing.name}'. "
+                "Do you want to update it or save as a new profile?"
+            )
+            update_button = chooser.addButton("Update Profile", QMessageBox.ButtonRole.AcceptRole)
+            save_new_button = chooser.addButton("Save as New", QMessageBox.ButtonRole.ActionRole)
+            chooser.addButton("Keep Existing", QMessageBox.ButtonRole.RejectRole)
+            chooser.setDefaultButton(update_button)
+            chooser.exec()
+            clicked = chooser.clickedButton()
+            if clicked == update_button:
+                return self._edit_profile(existing, forced_url=raw_link)
+            if clicked == save_new_button:
+                return self._add_profile(raw_link=raw_link, suggested_name=self._suggest_profile_name(parsed_link))
+            return existing
+
+        return self._add_profile(raw_link=raw_link, suggested_name=self._suggest_profile_name(parsed_link))
+
+    def _suggest_profile_name(self, parsed_link) -> str:
+        name = ""
+        try:
+            name = str(parsed_link.display_name())
+        except Exception:  # pragma: no cover - defensive
+            name = ""
+        return name.strip() or "Saved Profile"
+
+    def _add_profile(self, *, raw_link: str, suggested_name: str) -> Profile | None:
+        dialog = ProfileEditorDialog(
+            validate_fn=self._validate_link_for_dialog,
+            default_profile_id=self._profile_store.default_profile_id,
+            preset_url=raw_link,
+            parent=self,
         )
-        self.start_stop_button.setEnabled(True)
-        self.ping_button.setEnabled(True)
-        hint = (
-            f"Validated: {parsed_link.display_name()}. "
-            f"Ready to start (SOCKS5 {DEFAULT_LISTEN}:{self._socks_port}, HTTP {DEFAULT_LISTEN}:{self._http_port})."
+        dialog.name_input.setText(suggested_name)
+        if self._profile_store.default_profile_id is None:
+            dialog.default_checkbox.setChecked(True)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+
+        profile = self._profile_store.add_profile(dialog.build_profile())
+        if dialog.set_as_default:
+            self._profile_store.set_default(profile.id)
+        return profile
+
+    def _edit_profile(self, profile: Profile, *, forced_url: str | None = None) -> Profile | None:
+        dialog = ProfileEditorDialog(
+            validate_fn=self._validate_link_for_dialog,
+            profile=profile,
+            default_profile_id=self._profile_store.default_profile_id,
+            parent=self,
         )
-        warning = self._validation_warning(parsed_link)
-        if warning:
-            hint = f"{hint}  Warning: {warning}"
-        self.diagnostics_widget.set_hint(hint)
-        self._set_health_state("offline", "Not running")
+        if forced_url:
+            dialog.url_input.setText(forced_url)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+
+        updated = self._profile_store.update_profile(dialog.build_profile())
+        if dialog.set_as_default:
+            self._profile_store.set_default(updated.id)
+        return updated
 
     def _on_start_stop_clicked(self) -> None:
         if self._process.is_running():
@@ -351,6 +504,8 @@ class MainWindow(QMainWindow):
         self.start_stop_button.setProperty("variant", "danger")
         self._refresh_style(self.start_stop_button)
         self.link_input.setEnabled(False)
+        self.profile_selector.setEnabled(False)
+        self.manage_profiles_button.setEnabled(False)
         self.validate_button.setEnabled(False)
         self.system_proxy_checkbox.setEnabled(False)
         self.ping_button.setEnabled(False)
@@ -370,6 +525,7 @@ class MainWindow(QMainWindow):
             f"HTTP {DEFAULT_LISTEN}:{self._http_port}"
         )
         self.diagnostics_widget.set_hint(base_hint)
+        self._mark_profile_last_used()
         if self.system_proxy_checkbox.isChecked():
             self._apply_system_proxy()
         else:
@@ -392,6 +548,8 @@ class MainWindow(QMainWindow):
         self.start_stop_button.setProperty("variant", "primary")
         self._refresh_style(self.start_stop_button)
         self.link_input.setEnabled(True)
+        self.profile_selector.setEnabled(True)
+        self.manage_profiles_button.setEnabled(True)
         self.validate_button.setEnabled(True)
         self.system_proxy_checkbox.setEnabled(self._system_proxy.is_supported())
         self.ping_button.setEnabled(True if self._validated_link is not None else False)
@@ -427,6 +585,8 @@ class MainWindow(QMainWindow):
         self.start_stop_button.setProperty("variant", "primary")
         self._refresh_style(self.start_stop_button)
         self.link_input.setEnabled(True)
+        self.profile_selector.setEnabled(True)
+        self.manage_profiles_button.setEnabled(True)
         self.validate_button.setEnabled(True)
         self.system_proxy_checkbox.setEnabled(self._system_proxy.is_supported())
         self.ping_button.setEnabled(True if self._validated_link is not None else False)
@@ -440,48 +600,182 @@ class MainWindow(QMainWindow):
         else:
             self.diagnostics_widget.set_hint(user_message)
 
-    def _load_profile(self) -> None:
-        profile_path = get_config_dir() / PROFILE_FILE
-        data = load_json(profile_path, {})
-        if isinstance(data, dict):
-            link = data.get("link")
-            if isinstance(link, str) and link.strip():
-                self.link_input.setText(link)
-            self._theme = normalize_theme(data.get("theme"))
-            self.theme_selector.setCurrentText(theme_display_name(self._theme))
-            supported = self._system_proxy.is_supported()
-            apply_system_proxy = data.get(PROFILE_KEY_APPLY_SYSTEM_PROXY)
-            apply_system_proxy_explicit = data.get(PROFILE_KEY_APPLY_SYSTEM_PROXY_EXPLICIT)
-
-            changed = False
-            resolved_apply_system_proxy = supported
-
-            if isinstance(apply_system_proxy, bool) and isinstance(apply_system_proxy_explicit, bool):
-                resolved_apply_system_proxy = apply_system_proxy and supported
-            elif isinstance(apply_system_proxy, bool):
-                # Legacy profile migration: older versions persisted unchecked as a silent default.
-                resolved_apply_system_proxy = supported
-                data[PROFILE_KEY_APPLY_SYSTEM_PROXY] = resolved_apply_system_proxy
-                data[PROFILE_KEY_APPLY_SYSTEM_PROXY_EXPLICIT] = True
-                changed = True
-            else:
-                data[PROFILE_KEY_APPLY_SYSTEM_PROXY] = resolved_apply_system_proxy
-                data[PROFILE_KEY_APPLY_SYSTEM_PROXY_EXPLICIT] = True
-                changed = True
-
-            self.system_proxy_checkbox.setChecked(resolved_apply_system_proxy)
-
-            if changed:
-                save_json(profile_path, data)
-
-    def _on_system_proxy_toggled(self, checked: bool) -> None:
+    def _load_profile(self) -> dict:
         profile_path = get_config_dir() / PROFILE_FILE
         data = load_json(profile_path, {})
         if not isinstance(data, dict):
             data = {}
-        data[PROFILE_KEY_APPLY_SYSTEM_PROXY] = bool(checked)
-        data[PROFILE_KEY_APPLY_SYSTEM_PROXY_EXPLICIT] = True
-        save_json(profile_path, data)
+
+        self._theme = normalize_theme(data.get("theme"))
+        self.theme_selector.setCurrentText(theme_display_name(self._theme))
+        supported = self._system_proxy.is_supported()
+        apply_system_proxy = data.get(PROFILE_KEY_APPLY_SYSTEM_PROXY)
+        apply_system_proxy_explicit = data.get(PROFILE_KEY_APPLY_SYSTEM_PROXY_EXPLICIT)
+
+        changed = False
+        resolved_apply_system_proxy = supported
+
+        if isinstance(apply_system_proxy, bool) and isinstance(apply_system_proxy_explicit, bool):
+            resolved_apply_system_proxy = apply_system_proxy and supported
+        elif isinstance(apply_system_proxy, bool):
+            # Legacy migration: older versions persisted unchecked as a silent default.
+            resolved_apply_system_proxy = supported
+            data[PROFILE_KEY_APPLY_SYSTEM_PROXY] = resolved_apply_system_proxy
+            data[PROFILE_KEY_APPLY_SYSTEM_PROXY_EXPLICIT] = True
+            changed = True
+        else:
+            data[PROFILE_KEY_APPLY_SYSTEM_PROXY] = resolved_apply_system_proxy
+            data[PROFILE_KEY_APPLY_SYSTEM_PROXY_EXPLICIT] = True
+            changed = True
+
+        self.system_proxy_checkbox.setChecked(resolved_apply_system_proxy)
+        if changed:
+            save_json(profile_path, data)
+        return data
+
+    def _load_saved_profiles(self, profile_data: dict) -> None:
+        self._profile_store.load()
+        if self._profile_store.last_load_error:
+            QMessageBox.warning(
+                self,
+                "Saved Profiles Error",
+                self._profile_store.last_load_error,
+            )
+            self.diagnostics_widget.set_hint(self._profile_store.last_load_error)
+
+        self._migrate_legacy_link(profile_data)
+        self._refresh_profile_selector(select_profile_id=self._profile_store.default_profile_id)
+
+        default_profile = self._profile_store.get_default()
+        if default_profile is not None:
+            self._set_selected_profile(default_profile.id, populate_url=True)
+            return
+
+        legacy_link = profile_data.get("link")
+        if isinstance(legacy_link, str) and legacy_link.strip():
+            self.link_input.setText(legacy_link.strip())
+            existing = self._profile_store.find_by_url(legacy_link.strip())
+            self._selected_profile_id = existing.id if existing is not None else None
+            self._refresh_profile_selector(select_profile_id=self._selected_profile_id)
+
+    def _migrate_legacy_link(self, profile_data: dict) -> None:
+        already_migrated = bool(profile_data.get(PROFILE_KEY_PROFILES_MIGRATED))
+        if already_migrated:
+            return
+
+        imported = False
+        legacy_link = profile_data.get("link")
+        if isinstance(legacy_link, str) and legacy_link.strip() and not self._profile_store.profiles:
+            name = "Imported Profile"
+            try:
+                parsed_link = parse_link(legacy_link.strip())
+                display_name = parsed_link.display_name().strip()
+                if display_name:
+                    name = display_name
+            except AppError:
+                pass
+            profile = Profile.create(name=name, url=legacy_link.strip())
+            saved_profile = self._profile_store.add_profile(profile)
+            self._profile_store.set_default(saved_profile.id)
+            imported = True
+
+        profile_data[PROFILE_KEY_PROFILES_MIGRATED] = True
+        save_json(get_config_dir() / PROFILE_FILE, profile_data)
+        if imported:
+            self.diagnostics_widget.set_hint("Imported your previous saved URL into Saved Profiles.")
+
+    def _refresh_profile_selector(self, *, select_profile_id: str | None = None) -> None:
+        profiles = sorted(
+            self._profile_store.profiles,
+            key=lambda profile: (not profile.favorite, profile.name.lower(), profile.created_at),
+        )
+        current_target = select_profile_id or self._selected_profile_id
+
+        self._profile_selector_syncing = True
+        self.profile_selector.blockSignals(True)
+        self.profile_selector.clear()
+        self.profile_selector.addItem("Select profile...", None)
+
+        selected_index = 0
+        for profile in profiles:
+            label = profile.name
+            if profile.favorite:
+                label = f"★ {label}"
+            if self._profile_store.default_profile_id == profile.id:
+                label = f"{label} (default)"
+            self.profile_selector.addItem(label, profile.id)
+            if current_target and current_target == profile.id:
+                selected_index = self.profile_selector.count() - 1
+
+        self.profile_selector.setCurrentIndex(selected_index)
+        self.profile_selector.blockSignals(False)
+        self._profile_selector_syncing = False
+
+    def _set_selected_profile(self, profile_id: str | None, *, populate_url: bool) -> None:
+        self._selected_profile_id = profile_id
+        self._refresh_profile_selector(select_profile_id=profile_id)
+        if not populate_url or not profile_id:
+            return
+        profile = self._profile_store.get_by_id(profile_id)
+        if profile is not None:
+            self.link_input.setText(profile.url)
+
+    def _on_profile_selected(self, index: int) -> None:
+        if self._profile_selector_syncing:
+            return
+        profile_id = self.profile_selector.itemData(index)
+        if not isinstance(profile_id, str):
+            self._selected_profile_id = None
+            return
+
+        profile = self._profile_store.get_by_id(profile_id)
+        if profile is None:
+            self._selected_profile_id = None
+            return
+
+        self._selected_profile_id = profile.id
+        self.link_input.setText(profile.url)
+
+    def _on_manage_profiles_clicked(self) -> None:
+        dialog = ProfileManagerDialog(
+            store=self._profile_store,
+            validate_fn=self._validate_link_for_dialog,
+            parent=self,
+        )
+        dialog.exec()
+        if not dialog.changed:
+            return
+
+        current_url = self.link_input.text().strip()
+        matched_profile = self._profile_store.find_by_url(current_url)
+        target_id = matched_profile.id if matched_profile is not None else self._profile_store.default_profile_id
+        self._set_selected_profile(target_id, populate_url=False)
+
+        if not current_url:
+            default_profile = self._profile_store.get_default()
+            if default_profile is not None:
+                self._set_selected_profile(default_profile.id, populate_url=True)
+
+    def _mark_profile_last_used(self) -> None:
+        current_url = self.link_input.text().strip()
+        if not current_url:
+            return
+
+        profile = None
+        if self._selected_profile_id:
+            selected = self._profile_store.get_by_id(self._selected_profile_id)
+            if selected is not None and selected.url.strip() == current_url:
+                profile = selected
+        if profile is None:
+            profile = self._profile_store.find_by_url(current_url)
+        if profile is None:
+            return
+
+        self._profile_store.touch_last_used(profile.id)
+        self._set_selected_profile(profile.id, populate_url=False)
+
+    def _on_system_proxy_toggled(self, checked: bool) -> None:
+        self._save_profile_preferences()
 
     def _on_theme_changed(self, value: str) -> None:
         self._apply_theme(normalize_theme(value), persist=True)
@@ -493,19 +787,32 @@ class MainWindow(QMainWindow):
             apply_theme(app, theme)
 
         if persist:
-            profile_path = get_config_dir() / PROFILE_FILE
-            data = load_json(profile_path, {})
-            if not isinstance(data, dict):
-                data = {}
-            data["theme"] = theme
-            save_json(profile_path, data)
+            self._save_profile_preferences()
 
         self.theme_selector.blockSignals(True)
         self.theme_selector.setCurrentText(theme_display_name(theme))
         self.theme_selector.blockSignals(False)
 
-        for widget in (self.validate_button, self.start_stop_button, self.theme_selector):
+        for widget in (
+            self.validate_button,
+            self.start_stop_button,
+            self.theme_selector,
+            self.manage_profiles_button,
+            self.profile_selector,
+        ):
             self._refresh_style(widget)
+
+    def _save_profile_preferences(self, *, link: str | None = None) -> None:
+        profile_path = get_config_dir() / PROFILE_FILE
+        data = load_json(profile_path, {})
+        if not isinstance(data, dict):
+            data = {}
+        data["theme"] = self._theme
+        data[PROFILE_KEY_APPLY_SYSTEM_PROXY] = bool(self.system_proxy_checkbox.isChecked())
+        data[PROFILE_KEY_APPLY_SYSTEM_PROXY_EXPLICIT] = True
+        if link is not None:
+            data["link"] = link
+        save_json(profile_path, data)
 
     def _refresh_style(self, widget) -> None:
         style = widget.style()
