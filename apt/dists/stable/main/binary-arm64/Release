@@ -1,0 +1,6 @@
+Archive: stable
+Component: main
+Origin: v2link-client
+Label: v2link-client
+Architecture: arm64
+Description: v2link-client APT repository

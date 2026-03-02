@@ -1,0 +1,48 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA256
+
+Origin: v2link-client
+Label: v2link-client
+Suite: stable
+Codename: stable
+Date: Mon, 02 Mar 2026 18:37:53 UTC
+Architectures: amd64 arm64
+Components: main
+Description: v2link-client APT repository
+MD5Sum:
+ 28ed15841404af2c824ebf0b17bf5df0 765 main/binary-amd64/Packages
+ 302f76cbeed72a8f4b815b29ca9caaca 504 main/binary-amd64/Packages.gz
+ f1cc6ab208fd0d7de9505b1223b92f05 137 main/binary-amd64/Release
+ d41d8cd98f00b204e9800998ecf8427e 0 main/binary-arm64/Packages
+ 7029066c27ac6f5ef18d660d5741979a 20 main/binary-arm64/Packages.gz
+ 7dbdecf2391810bbebfe9994e9ddfb97 137 main/binary-arm64/Release
+ d41d8cd98f00b204e9800998ecf8427e 0 main/source/Sources
+ 7029066c27ac6f5ef18d660d5741979a 20 main/source/Sources.gz
+ 9c1461bd510863abfbbdd7f6af80e952 138 main/source/Release
+SHA1:
+ cfe45049ca8185c5f4dc18d780d8539435f040ca 765 main/binary-amd64/Packages
+ 1eeb5e06bab98842c0bea772e25dfa497294e079 504 main/binary-amd64/Packages.gz
+ 3576dedf52250ec80fca4bfdac6cd99a32f33ce3 137 main/binary-amd64/Release
+ da39a3ee5e6b4b0d3255bfef95601890afd80709 0 main/binary-arm64/Packages
+ 46c6643f07aa7f6bfe7118de926b86defc5087c4 20 main/binary-arm64/Packages.gz
+ e6c78eda1e64d7315276fc2d00023c65a4bdf7de 137 main/binary-arm64/Release
+ da39a3ee5e6b4b0d3255bfef95601890afd80709 0 main/source/Sources
+ 46c6643f07aa7f6bfe7118de926b86defc5087c4 20 main/source/Sources.gz
+ 0117d6784148ab3af16eb025404f90ed4cae79e1 138 main/source/Release
+SHA256:
+ 68160bed656e3e4eea57e64daa3cf56a643bc76b998997e7048f6bee4dc1f3fa 765 main/binary-amd64/Packages
+ 541f3c58931679a623990e7e85ff2774b2f36412db8cba97e025e70cfb33c488 504 main/binary-amd64/Packages.gz
+ 01c5dac3905f7da69c89ad2c78c4075941952b8e8b316cf650c224251c009c88 137 main/binary-amd64/Release
+ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 main/binary-arm64/Packages
+ 59869db34853933b239f1e2219cf7d431da006aa919635478511fabbfc8849d2 20 main/binary-arm64/Packages.gz
+ 641fb34044d11386ac609854e7d677c50e0024f6a3c854f12e16f6a49c34ca7d 137 main/binary-arm64/Release
+ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 main/source/Sources
+ 59869db34853933b239f1e2219cf7d431da006aa919635478511fabbfc8849d2 20 main/source/Sources.gz
+ e8125aa0cce10ddf9a201f65c6aa6a5aa0827e43f79622a952065a81a4cb567e 138 main/source/Release
+-----BEGIN PGP SIGNATURE-----
+
+iHUEARYIAB0WIQSCR61Qoslfq0+aMJGYt/sY2MfFAwUCaaXZAQAKCRCYt/sY2MfF
+AwZlAQDxnBPKurDqgD9OmZA8BQgOl9LhEEq1+KUZUR0mDHnWSgEAvBBfZxhPXqGw
+HMoQWK4rp86W1ago0Qu3eOtVGtWBuwg=
+=M/66
+-----END PGP SIGNATURE-----

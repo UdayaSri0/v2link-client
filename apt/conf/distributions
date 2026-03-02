@@ -1,0 +1,8 @@
+Origin: v2link-client
+Label: v2link-client
+Suite: stable
+Codename: stable
+Architectures: amd64 arm64 source
+Components: main
+Description: v2link-client APT repository
+SignWith: 8247AD50A2C95FAB4F9A309198B7FB18D8C7C503
