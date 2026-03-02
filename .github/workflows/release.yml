@@ -59,3 +59,65 @@ jobs:
             dist/SHA256SUMS
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-apt-repo:
+    runs-on: ubuntu-22.04
+    needs: build-linux
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: v2link-client-linux
+          path: dist
+
+      - name: Verify .deb artifact exists
+        run: |
+          if ! find dist -maxdepth 3 -type f -name "*.deb" | grep -q .; then
+            echo "Error: .deb artifact not found after download." >&2
+            exit 1
+          fi
+
+      - name: Install APT repo dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y reprepro gnupg
+
+      - name: Import APT signing key
+        id: import_gpg
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.APT_GPG_PASSPHRASE }}
+
+      - name: Verify signing key matches apt/public.key
+        run: |
+          repo_fingerprint="$(gpg --show-keys --with-colons apt/public.key | awk -F: '$1=="fpr"{print toupper($10); exit}')"
+          secret_fingerprint="$(echo "${{ steps.import_gpg.outputs.fingerprint }}" | tr '[:lower:]' '[:upper:]')"
+          if [[ -z "${repo_fingerprint}" ]]; then
+            echo "Error: could not read fingerprint from apt/public.key" >&2
+            exit 1
+          fi
+          if [[ "${repo_fingerprint}" != "${secret_fingerprint}" ]]; then
+            echo "Error: apt/public.key fingerprint does not match APT_GPG_PRIVATE_KEY secret." >&2
+            echo "Public key: ${repo_fingerprint}" >&2
+            echo "Secret key: ${secret_fingerprint}" >&2
+            exit 1
+          fi
+
+      - name: Build signed APT repository
+        env:
+          APT_GPG_KEY_ID: ${{ steps.import_gpg.outputs.fingerprint }}
+        run: |
+          ./scripts/apt_repo_build.sh --dist-dir dist --repo-dir public/apt --codename stable --component main
+
+      - name: Publish APT repository to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./public
+          enable_jekyll: false
