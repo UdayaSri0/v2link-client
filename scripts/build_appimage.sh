@@ -105,11 +105,12 @@ cp -a "${PYINSTALLER_DIR}/." "${APPDIR}/usr/bin/"
 cp "${DESKTOP_SRC}" "${APPDIR}/${APP_NAME}.desktop"
 cp "${ICON_SRC}" "${APPDIR}/${APP_NAME}.png"
 
-cat >"${APPDIR}/AppRun" <<'EOF'
+cat >"${APPDIR}/AppRun" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-APPDIR="$(cd "$(dirname "$0")" && pwd)"
-exec "${APPDIR}/usr/bin/v2link-client" "$@"
+APPDIR="\$(cd "\$(dirname "\$0")" && pwd)"
+export V2LINK_CLIENT_VERSION="${VERSION_NAME}"
+exec "\${APPDIR}/usr/bin/v2link-client" "\$@"
 EOF
 chmod +x "${APPDIR}/AppRun"
 
