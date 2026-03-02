@@ -47,6 +47,7 @@ jobs:
           name: v2link-client-linux
           path: |
             dist/*.AppImage
+            dist/*.deb
             dist/SHA256SUMS
 
       - name: Publish GitHub release assets
@@ -54,6 +55,7 @@ jobs:
         with:
           files: |
             dist/*.AppImage
+            dist/*.deb
             dist/SHA256SUMS
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -69,6 +69,28 @@ Replace `YOUR_USER` with your Linux username.
 
 If `xray version` fails, install Xray-core first and re-run the app.
 
+## Installation (.deb package)
+
+1) Open GitHub Releases and download the latest `v2link-client_<version>_amd64.deb` (or `arm64`) package.
+
+2) Install it:
+
+```bash
+sudo dpkg -i v2link-client_<version>_amd64.deb
+```
+
+3) Fix missing dependencies (if prompted):
+
+```bash
+sudo apt -f install
+```
+
+4) Launch from your app menu or run:
+
+```bash
+v2link-client
+```
+
 ## Installation (run from source)
 
 1) Install system packages (Ubuntu/Debian):
@@ -111,6 +133,7 @@ Build artifacts locally:
 
 Outputs are written to `dist/`:
 - `v2link-client-<version>-linux-<arch>.AppImage`
+- `v2link-client_<version>_<arch>.deb`
 - `SHA256SUMS`
 
 Publish on GitHub:
@@ -120,7 +143,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-Tag pushes matching `v*` trigger `.github/workflows/release.yml`, which builds the AppImage and uploads assets to the GitHub Release automatically.
+Tag pushes matching `v*` trigger `.github/workflows/release.yml`, which builds AppImage + `.deb` artifacts and uploads them to the GitHub Release automatically.
 
 ## Usage
 

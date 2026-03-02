@@ -1,0 +1,12 @@
+Package: @PACKAGE@
+Version: @VERSION@
+Section: net
+Priority: optional
+Architecture: @ARCH@
+Maintainer: Udaya Sri <udayasri0@users.noreply.github.com>
+Homepage: https://github.com/UdayaSri0/v2link-client
+Depends: @DEPENDS@
+Description: Linux desktop client for V2Ray-style links
+ Linux desktop client for V2Ray-style links built with Python and PyQt6.
+ Runs Xray-core under the hood and provides profile management,
+ diagnostics, and desktop proxy integration.
