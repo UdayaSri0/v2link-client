@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=v2link-client
+Comment=Linux desktop client for V2Ray-style links
+Exec=v2link-client
+Type=Application
+Icon=v2link-client
+Terminal=false
+Categories=Network;
+X-AppImage-Version=0.1.9.0.0

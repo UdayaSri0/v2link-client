@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+APPDIR="$(cd "$(dirname "$0")" && pwd)"
+export V2LINK_CLIENT_VERSION="0.1.9.0.0"
+exec "${APPDIR}/usr/bin/v2link-client" "$@"

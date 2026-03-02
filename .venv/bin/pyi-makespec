@@ -1,0 +1,6 @@
+#!/home/strix/Documents/GitHub/v2link-client/.venv/bin/python
+import sys
+from PyInstaller.utils.cliutils.makespec import run
+if __name__ == '__main__':
+    sys.argv[0] = sys.argv[0].removesuffix('.exe')
+    sys.exit(run())

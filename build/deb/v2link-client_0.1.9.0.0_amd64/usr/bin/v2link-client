@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+export V2LINK_CLIENT_VERSION="0.1.9.0.0"
+exec /opt/v2link-client/v2link-client "$@"
