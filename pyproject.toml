@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "v2link-client"
-version = "0.1.0"
+version = "0.1.9.0.0"
 description = "Linux desktop client for V2Ray-style links."
 readme = "README.md"
 requires-python = ">=3.11"

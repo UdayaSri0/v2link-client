@@ -69,6 +69,52 @@ Replace `YOUR_USER` with your Linux username.
 
 If `xray version` fails, install Xray-core first and re-run the app.
 
+## Install via apt
+
+Add the repository signing key:
+
+```bash
+curl -fsSL https://udayasri0.github.io/v2link-client/apt/public.key \
+  | gpg --dearmor \
+  | sudo tee /usr/share/keyrings/v2link-client-archive-keyring.gpg >/dev/null
+```
+
+Add the APT source:
+
+```bash
+echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/v2link-client-archive-keyring.gpg] https://udayasri0.github.io/v2link-client/apt stable main" \
+  | sudo tee /etc/apt/sources.list.d/v2link-client.list >/dev/null
+```
+
+Install:
+
+```bash
+sudo apt update
+sudo apt install v2link-client
+```
+
+## Installation (.deb package)
+
+1) Open GitHub Releases and download the latest `v2link-client_<version>_amd64.deb` (or `arm64`) package.
+
+2) Install it:
+
+```bash
+sudo dpkg -i v2link-client_<version>_amd64.deb
+```
+
+3) Fix missing dependencies (if prompted):
+
+```bash
+sudo apt -f install
+```
+
+4) Launch from your app menu or run:
+
+```bash
+v2link-client
+```
+
 ## Installation (run from source)
 
 1) Install system packages (Ubuntu/Debian):
@@ -111,6 +157,7 @@ Build artifacts locally:
 
 Outputs are written to `dist/`:
 - `v2link-client-<version>-linux-<arch>.AppImage`
+- `v2link-client_<version>_<arch>.deb`
 - `SHA256SUMS`
 
 Publish on GitHub:
@@ -120,7 +167,20 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-Tag pushes matching `v*` trigger `.github/workflows/release.yml`, which builds the AppImage and uploads assets to the GitHub Release automatically.
+Tag pushes matching `v*` trigger `.github/workflows/release.yml`, which builds AppImage + `.deb` artifacts and uploads them to the GitHub Release automatically.
+The same workflow also builds a signed APT repository (using `reprepro`) and publishes it to the `gh-pages` branch.
+
+### APT signing key setup (maintainers)
+
+The APT repo signing key public half is committed at `apt/public.key`.
+Export the matching private key and store it in GitHub repository secrets:
+
+```bash
+gpg --armor --export-secret-keys "v2link-client APT Repository <apt@v2link-client.local>"
+```
+
+- Save the ASCII-armored output as secret `APT_GPG_PRIVATE_KEY`
+- If your key is passphrase-protected, save that passphrase as `APT_GPG_PASSPHRASE`
 
 ## Usage
 
