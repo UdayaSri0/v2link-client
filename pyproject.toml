@@ -12,6 +12,7 @@ dependencies = [
   "PyQt6>=6.6",
   "platformdirs>=4.2",
   "pydantic>=2.6",
+  "packaging>=24.0",
 ]
 
 [tool.setuptools]
