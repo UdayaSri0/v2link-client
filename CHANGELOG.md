@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- Hardened GNOME System Proxy lifecycle by adding runtime drift audits/reconciliation while Xray is running, so proxy mode/host/port are auto-corrected on mismatch instead of relying on one-time startup apply.
+- Added session ownership metadata to system proxy snapshots and ownership-aware restore paths to avoid false restore/no-proxy actions from non-owning sessions, while keeping crash recovery.
+- Improved diagnostics to report proxy backend, desired vs actual GNOME proxy state, local HTTP/SOCKS listener reachability, recent Xray traffic signal, last auto-reapply reason/time, and backend warning signals from `gsettings`/Gio stderr.
+
 ## [0.8.2] - 2026-02-28
 
 ### Added

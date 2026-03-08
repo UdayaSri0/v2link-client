@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import socket
 import tempfile
 import time
 
@@ -38,7 +39,11 @@ from v2link_client.core.humanize import format_bytes, format_duration_s, format_
 from v2link_client.core.link_parser import parse_link
 from v2link_client.core.net_probe import ServerPingResult, ping_server
 from v2link_client.core.profile_store import Profile, ProfileStore
-from v2link_client.core.proxy_manager import SystemProxyConfig, SystemProxyManager
+from v2link_client.core.proxy_manager import (
+    SystemProxyAuditResult,
+    SystemProxyConfig,
+    SystemProxyManager,
+)
 from v2link_client.core.process_manager import (
     XrayProcessManager,
     ensure_port_available,
@@ -62,6 +67,9 @@ PROFILE_KEY_APPLY_SYSTEM_PROXY_EXPLICIT = "apply_system_proxy_explicit"
 PROFILE_KEY_PROFILES_MIGRATED = "profiles_migrated_v1"
 
 HEALTH_INTERVAL_MS = 5000
+PROXY_AUDIT_INTERVAL_MS = 4000
+PROXY_AUDIT_MAX_BACKOFF_S = 30.0
+RECENT_TRAFFIC_WINDOW_S = 15.0
 
 
 class HealthCheckWorkerSignals(QObject):
@@ -218,6 +226,14 @@ class MainWindow(QMainWindow):
 
         self._system_proxy = SystemProxyManager()
         self._system_proxy_applied = False
+        self._system_proxy_cfg: SystemProxyConfig | None = None
+        self._last_proxy_audit: SystemProxyAuditResult | None = None
+        self._last_proxy_audit_error: str | None = None
+        self._last_proxy_reapply_at: str | None = None
+        self._last_proxy_reapply_reason: str | None = None
+        self._proxy_audit_failures = 0
+        self._next_proxy_reconcile_at = 0.0
+        self._proxy_audit_running = False
         if not self._system_proxy.is_supported():
             self.system_proxy_checkbox.setEnabled(False)
             self.system_proxy_checkbox.setToolTip(
@@ -230,6 +246,12 @@ class MainWindow(QMainWindow):
         self._health_in_flight = False
         self._health_token = 0
         self._last_health_ok: bool | None = None
+        self._health_state = "offline"
+        self._health_detail = "Not running"
+
+        self._proxy_audit_timer = QTimer(self)
+        self._proxy_audit_timer.setInterval(PROXY_AUDIT_INTERVAL_MS)
+        self._proxy_audit_timer.timeout.connect(self._audit_system_proxy_runtime)
 
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(1000)
@@ -241,6 +263,7 @@ class MainWindow(QMainWindow):
         self._last_stats_at: float | None = None
         self._last_uplink: int | None = None
         self._last_downlink: int | None = None
+        self._last_traffic_activity_at: float | None = None
         self._ping_in_flight = False
         self._speed_test_in_flight = False
 
@@ -265,6 +288,7 @@ class MainWindow(QMainWindow):
                 )
         except Exception:
             logger.exception("Failed to auto-repair stale loopback proxy settings")
+        self._update_diagnostics_runtime_state()
 
     def _setup_menu(self) -> None:
         help_menu = self.menuBar().addMenu("&Help")
@@ -356,7 +380,9 @@ class MainWindow(QMainWindow):
         self._last_stats_at = None
         self._last_uplink = None
         self._last_downlink = None
+        self._last_traffic_activity_at = None
         self._set_metrics_defaults()
+        self._update_diagnostics_runtime_state()
 
     def _validate_link(
         self, raw_link: str, *, persist_runtime_config: bool
@@ -515,6 +541,7 @@ class MainWindow(QMainWindow):
         self._last_stats_at = None
         self._last_uplink = None
         self._last_downlink = None
+        self._last_traffic_activity_at = None
         self._health_token += 1
         self._last_health_ok = None
         self._set_health_state("connecting", "Checking…")
@@ -529,10 +556,17 @@ class MainWindow(QMainWindow):
         if self.system_proxy_checkbox.isChecked():
             self._apply_system_proxy()
         else:
+            self._system_proxy_applied = False
+            self._system_proxy_cfg = None
+            self._last_proxy_audit = None
+            self._last_proxy_audit_error = None
+            self._proxy_audit_timer.stop()
+            self._proxy_audit_running = False
             self.diagnostics_widget.set_hint(
                 f"{base_hint}. System Proxy is OFF, so only apps configured to use these local "
                 "proxy ports will use the tunnel."
             )
+        self._update_diagnostics_runtime_state()
         self._status_timer.start()
 
     def _poll_core_status(self) -> None:
@@ -555,11 +589,13 @@ class MainWindow(QMainWindow):
         self.ping_button.setEnabled(True if self._validated_link is not None else False)
         self.speed_test_button.setEnabled(False)
         self._health_timer.stop()
+        self._proxy_audit_timer.stop()
         self._health_token += 1
         self._stats_token += 1
         self._set_health_state("offline", "Not running")
         proxy_note = self._restore_system_proxy()
         self._core_started_at = None
+        self._last_traffic_activity_at = None
         self._set_metrics_defaults()
 
         suffix = f" (exit code {code})" if code is not None else ""
@@ -569,10 +605,12 @@ class MainWindow(QMainWindow):
         if proxy_note:
             hint = f"{hint} {proxy_note}"
         self.diagnostics_widget.set_hint(hint)
+        self._update_diagnostics_runtime_state()
 
     def _stop_core(self, *, user_message: str) -> None:
         self._status_timer.stop()
         self._health_timer.stop()
+        self._proxy_audit_timer.stop()
         self._health_token += 1
         self._stats_token += 1
         try:
@@ -594,11 +632,13 @@ class MainWindow(QMainWindow):
         self._set_health_state("offline", "Not running")
         proxy_note = self._restore_system_proxy()
         self._core_started_at = None
+        self._last_traffic_activity_at = None
         self._set_metrics_defaults()
         if proxy_note:
             self.diagnostics_widget.set_hint(f"{user_message} {proxy_note}")
         else:
             self.diagnostics_widget.set_hint(user_message)
+        self._update_diagnostics_runtime_state()
 
     def _load_profile(self) -> dict:
         profile_path = get_config_dir() / PROFILE_FILE
@@ -776,6 +816,7 @@ class MainWindow(QMainWindow):
 
     def _on_system_proxy_toggled(self, checked: bool) -> None:
         self._save_profile_preferences()
+        self._update_diagnostics_runtime_state()
 
     def _on_theme_changed(self, value: str) -> None:
         self._apply_theme(normalize_theme(value), persist=True)
@@ -853,6 +894,152 @@ class MainWindow(QMainWindow):
         self.speed_label.setText("SPEED (↑ 0.0 Mbps / ↓ 0.0 Mbps)")
         self.traffic_label.setText("TRAFFIC (↑ 0 B / ↓ 0 B)")
 
+    def _tcp_reachable(self, host: str, port: int, *, timeout_s: float = 0.25) -> bool:
+        try:
+            sock = socket.create_connection((host, int(port)), timeout=timeout_s)
+        except OSError:
+            return False
+        sock.close()
+        return True
+
+    def _listener_reachability(self) -> tuple[bool, bool]:
+        if not self._process.is_running():
+            return False, False
+        http_ok = self._tcp_reachable(DEFAULT_LISTEN, int(self._http_port))
+        socks_ok = self._tcp_reachable(DEFAULT_LISTEN, int(self._socks_port))
+        return http_ok, socks_ok
+
+    def _recent_traffic_flowing(self, *, now: float | None = None) -> bool:
+        if self._last_traffic_activity_at is None:
+            return False
+        current = now if now is not None else time.monotonic()
+        return (current - self._last_traffic_activity_at) <= RECENT_TRAFFIC_WINDOW_S
+
+    def _proxy_status_to_dict(self, status) -> dict[str, object] | None:
+        if status is None:
+            return None
+        return {
+            "mode": status.mode,
+            "http_enabled": bool(status.http_enabled),
+            "http_host": status.http_host,
+            "http_port": int(status.http_port),
+            "socks_host": status.socks_host,
+            "socks_port": int(status.socks_port),
+        }
+
+    def _update_diagnostics_runtime_state(self) -> None:
+        http_ok, socks_ok = self._listener_reachability()
+        audit = self._last_proxy_audit
+        now = time.monotonic()
+
+        desired = self._proxy_status_to_dict(audit.desired if audit is not None else None)
+        actual = self._proxy_status_to_dict(audit.actual if audit is not None else None)
+        mismatches: list[str] = []
+        if audit is not None and audit.mismatches:
+            mismatches = list(audit.mismatches)
+
+        if desired is None and self._system_proxy_cfg is not None:
+            cfg = self._system_proxy_cfg
+            desired = {
+                "mode": "manual",
+                "http_enabled": True,
+                "http_host": cfg.http_host,
+                "http_port": int(cfg.http_port),
+                "socks_host": cfg.socks_host,
+                "socks_port": int(cfg.socks_port),
+            }
+
+        state = {
+            "system_proxy": {
+                "enabled_preference": bool(self.system_proxy_checkbox.isChecked()),
+                "supported": bool(self._system_proxy.is_supported()),
+                "applied_by_session": bool(self._system_proxy_applied),
+                "backend": self._system_proxy.backend,
+                "desired": desired,
+                "actual": actual,
+                "matches_desired": bool(audit.matches_desired) if audit is not None else None,
+                "mismatches": mismatches,
+                "last_audit_error": self._last_proxy_audit_error,
+                "last_auto_reapply_at": self._last_proxy_reapply_at,
+                "last_auto_reapply_reason": self._last_proxy_reapply_reason,
+            },
+            "xray": {
+                "running": bool(self._process.is_running()),
+                "health_state": self._health_state,
+                "health_detail": self._health_detail,
+                "http_listener_reachable": http_ok,
+                "socks_listener_reachable": socks_ok,
+                "recent_traffic_flowing": self._recent_traffic_flowing(now=now),
+            },
+        }
+        self.diagnostics_widget.set_runtime_state(state)
+
+    def _audit_system_proxy_runtime(self) -> None:
+        if self._proxy_audit_running:
+            return
+        if not self._process.is_running() or not self._system_proxy_applied or self._system_proxy_cfg is None:
+            self._proxy_audit_timer.stop()
+            self._update_diagnostics_runtime_state()
+            return
+
+        self._proxy_audit_running = True
+        now = time.monotonic()
+        try:
+            audit = self._system_proxy.audit_runtime(self._system_proxy_cfg, reconcile=False)
+            self._last_proxy_audit = audit
+            self._last_proxy_audit_error = None
+
+            if audit.mismatches:
+                if now < self._next_proxy_reconcile_at:
+                    wait_s = max(0.0, self._next_proxy_reconcile_at - now)
+                    logger.info(
+                        "System proxy drift detected, waiting %.1fs before reconcile retry",
+                        wait_s,
+                    )
+                    self.diagnostics_widget.set_hint(
+                        f"System proxy drift detected; retrying auto-reapply in {wait_s:.1f}s."
+                    )
+                else:
+                    drift_reason = "; ".join(audit.mismatches)
+                    reconciled = self._system_proxy.audit_runtime(self._system_proxy_cfg, reconcile=True)
+                    self._last_proxy_audit = reconciled
+                    self._proxy_audit_failures = 0
+                    self._next_proxy_reconcile_at = 0.0
+                    self._last_proxy_reapply_at = time.strftime("%Y-%m-%d %H:%M:%S")
+                    self._last_proxy_reapply_reason = drift_reason
+                    self.diagnostics_widget.set_hint(
+                        f"System proxy drift detected and auto-reapplied ({drift_reason})."
+                    )
+            else:
+                self._proxy_audit_failures = 0
+                self._next_proxy_reconcile_at = 0.0
+        except AppError as exc:
+            self._last_proxy_audit_error = exc.user_message
+            self._proxy_audit_failures += 1
+            backoff = min(PROXY_AUDIT_MAX_BACKOFF_S, float(2 ** min(self._proxy_audit_failures, 5)))
+            self._next_proxy_reconcile_at = now + backoff
+            logger.warning(
+                "System proxy audit failed (attempt %s, backoff %.1fs): %s",
+                self._proxy_audit_failures,
+                backoff,
+                exc.user_message,
+            )
+            self.diagnostics_widget.set_hint(
+                f"System proxy drift detected, but auto-reapply failed: {exc.user_message}"
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            self._last_proxy_audit_error = str(exc)
+            self._proxy_audit_failures += 1
+            backoff = min(PROXY_AUDIT_MAX_BACKOFF_S, float(2 ** min(self._proxy_audit_failures, 5)))
+            self._next_proxy_reconcile_at = now + backoff
+            logger.exception("System proxy runtime audit failed")
+            self.diagnostics_widget.set_hint(
+                "System proxy drift detected, but auto-reapply hit an unexpected error."
+            )
+        finally:
+            self._proxy_audit_running = False
+            self._update_diagnostics_runtime_state()
+
     def _update_uptime(self) -> None:
         if self._core_started_at is None:
             self.uptime_label.setText("UPTIME (00:00:00)")
@@ -896,17 +1083,25 @@ class MainWindow(QMainWindow):
         )
 
         # Speed = delta bytes / delta time.
+        up_delta = 0
+        down_delta = 0
         if self._last_stats_at is not None and self._last_uplink is not None and self._last_downlink is not None:
             dt = max(0.001, float(now) - float(self._last_stats_at))
-            up_bps = (stats.uplink_bytes - self._last_uplink) / dt
-            down_bps = (stats.downlink_bytes - self._last_downlink) / dt
+            up_delta = int(stats.uplink_bytes - self._last_uplink)
+            down_delta = int(stats.downlink_bytes - self._last_downlink)
+            up_bps = up_delta / dt
+            down_bps = down_delta / dt
             self.speed_label.setText(
                 f"SPEED (↑ {format_mbps(up_bps)} / ↓ {format_mbps(down_bps)})"
             )
 
+        if up_delta > 0 or down_delta > 0:
+            self._last_traffic_activity_at = float(now)
+
         self._last_stats_at = float(now)
         self._last_uplink = int(stats.uplink_bytes)
         self._last_downlink = int(stats.downlink_bytes)
+        self._update_diagnostics_runtime_state()
 
     def _on_stats_error(self, token: int, message: str) -> None:
         self._stats_in_flight = False
@@ -914,6 +1109,7 @@ class MainWindow(QMainWindow):
             return
         # Keep the UI stable; stats may be unavailable if API isn't ready yet.
         logger.info("Stats poll failed: %s", message)
+        self._update_diagnostics_runtime_state()
 
     def _on_ping_clicked(self) -> None:
         if self._ping_in_flight:
@@ -1064,16 +1260,20 @@ class MainWindow(QMainWindow):
                 f"Connectivity went offline: {result.error or 'unknown error'}"
             )
         self._last_health_ok = ok_now
+        self._update_diagnostics_runtime_state()
 
     def _on_health_error(self, token: int, message: str) -> None:
         self._health_in_flight = False
         if token != self._health_token:
             return
         self._set_health_state("offline", message)
+        self._update_diagnostics_runtime_state()
 
     def _set_health_state(self, state: str, detail: str) -> None:
         state = state.lower()
         detail = detail.strip() or "—"
+        self._health_state = state
+        self._health_detail = detail
         detail_short = detail if len(detail) <= 60 else f"{detail[:57]}…"
         self.health_label.setToolTip(detail)
         if state == "online":
@@ -1102,16 +1302,15 @@ class MainWindow(QMainWindow):
                 "System proxy apply is not supported on this desktop yet. Use manual proxy settings."
             )
             return
+        cfg = SystemProxyConfig(
+            http_host=DEFAULT_LISTEN,
+            http_port=int(self._http_port),
+            socks_host=DEFAULT_LISTEN,
+            socks_port=int(self._socks_port),
+            bypass_hosts=["localhost", "127.0.0.0/8", "::1"],
+        )
         try:
-            status = self._system_proxy.apply(
-                SystemProxyConfig(
-                    http_host=DEFAULT_LISTEN,
-                    http_port=int(self._http_port),
-                    socks_host=DEFAULT_LISTEN,
-                    socks_port=int(self._socks_port),
-                    bypass_hosts=["localhost", "127.0.0.0/8", "::1"],
-                )
-            )
+            status = self._system_proxy.apply(cfg)
         except AppError as exc:
             self.diagnostics_widget.set_hint(f"Started, but failed to apply system proxy: {exc.user_message}")
             return
@@ -1121,25 +1320,39 @@ class MainWindow(QMainWindow):
             return
 
         self._system_proxy_applied = True
+        self._system_proxy_cfg = cfg
+        self._last_proxy_audit = None
+        self._last_proxy_audit_error = None
+        self._last_proxy_reapply_at = None
+        self._last_proxy_reapply_reason = None
+        self._proxy_audit_failures = 0
+        self._next_proxy_reconcile_at = 0.0
+        self._proxy_audit_timer.start()
+        self._audit_system_proxy_runtime()
         self.diagnostics_widget.set_hint(
             "System proxy applied and verified: "
             f"mode={status.mode}, "
             f"http={status.http_host}:{status.http_port} (enabled={status.http_enabled}), "
             f"socks={status.socks_host}:{status.socks_port}."
         )
+        self._update_diagnostics_runtime_state()
 
     def _restore_system_proxy(self) -> str | None:
-        if not self._system_proxy_applied and not self._system_proxy.snapshot_path.exists():
+        if not self._system_proxy_applied:
             return None
+        self._proxy_audit_timer.stop()
         restore_note: str | None = None
         try:
-            status = self._system_proxy.restore()
-            restore_note = (
-                "System proxy restored: "
-                f"mode={status.mode}, "
-                f"http={status.http_host}:{status.http_port}, "
-                f"socks={status.socks_host}:{status.socks_port}."
-            )
+            status = self._system_proxy.restore_if_owned()
+            if status is None:
+                restore_note = "System proxy restore skipped (this session is not the snapshot owner)."
+            else:
+                restore_note = (
+                    "System proxy restored: "
+                    f"mode={status.mode}, "
+                    f"http={status.http_host}:{status.http_port}, "
+                    f"socks={status.socks_host}:{status.socks_port}."
+                )
         except AppError as exc:
             logger.exception("System proxy restore failed")
             try:
@@ -1159,4 +1372,11 @@ class MainWindow(QMainWindow):
             logger.exception("System proxy restore failed")
             restore_note = f"System proxy restore failed: {exc}."
         self._system_proxy_applied = False
+        self._system_proxy_cfg = None
+        self._last_proxy_audit = None
+        self._last_proxy_audit_error = None
+        self._proxy_audit_failures = 0
+        self._next_proxy_reconcile_at = 0.0
+        self._proxy_audit_running = False
+        self._update_diagnostics_runtime_state()
         return restore_note

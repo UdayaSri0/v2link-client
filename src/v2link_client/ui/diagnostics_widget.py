@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import logging
-from typing import Callable
+from typing import Any, Callable
 
 from PyQt6.QtCore import QObject, QRunnable, Qt, QThreadPool, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
@@ -51,6 +52,7 @@ class DiagnosticsWidget(QWidget):
         self.thread_pool = QThreadPool.globalInstance()
         self._socks_port = 1080
         self._http_port = 8080
+        self._runtime_state: dict[str, Any] | None = None
 
         self.hint_label = QLabel("")
         self.hint_label.setProperty("role", "hint")
@@ -95,12 +97,16 @@ class DiagnosticsWidget(QWidget):
         self._socks_port = socks_port
         self._http_port = http_port
 
+    def set_runtime_state(self, state: dict[str, Any] | None) -> None:
+        self._runtime_state = copy.deepcopy(state) if isinstance(state, dict) else None
+
     def refresh(self) -> None:
         self.set_hint("")
         self.text_area.setPlainText("Refreshing diagnostics...")
         self.refresh_button.setEnabled(False)
 
-        worker = DiagnosticsWorker(collect_diagnostics)
+        state_snapshot = copy.deepcopy(self._runtime_state)
+        worker = DiagnosticsWorker(lambda: collect_diagnostics(state=state_snapshot))
         worker.signals.result.connect(self._on_result)
         worker.signals.error.connect(self._on_error)
         self.thread_pool.start(worker)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 
 import pytest
 
@@ -34,6 +35,8 @@ def _default_gsettings_state() -> dict[tuple[str, str], str]:
 @pytest.fixture(autouse=True)
 def _disable_gio_backend(monkeypatch) -> None:
     monkeypatch.setattr(pm, "_gio_available", lambda: False)
+    pm._GSETTINGS_KEY_CACHE.clear()
+    pm._BACKEND_WARNING_HISTORY.clear()
 
 
 def _fake_run_factory(
@@ -305,3 +308,174 @@ def test_repair_stale_loopback_proxy_noop_when_proxy_is_reachable(tmp_path, monk
     mgr = SystemProxyManager(state_dir=tmp_path)
     assert mgr.repair_stale_loopback_proxy() is False
     assert state[("org.gnome.system.proxy", "mode")] == "'manual'"
+
+
+def test_apply_success_sets_manual_proxy_and_snapshot(tmp_path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+    state = _default_gsettings_state()
+
+    monkeypatch.setattr(pm.shutil, "which", lambda _name: "/usr/bin/gsettings")
+    monkeypatch.setattr(pm.subprocess, "run", _fake_run_factory(state, calls))
+
+    mgr = SystemProxyManager(state_dir=tmp_path)
+    status = mgr.apply(
+        SystemProxyConfig(
+            http_host="127.0.0.1",
+            http_port=8080,
+            socks_host="127.0.0.1",
+            socks_port=1080,
+            bypass_hosts=["localhost", "127.0.0.0/8", "::1"],
+        )
+    )
+
+    assert status.mode == "manual"
+    assert status.http_enabled is True
+    assert status.http_host == "127.0.0.1"
+    assert status.http_port == 8080
+    assert status.socks_host == "127.0.0.1"
+    assert status.socks_port == 1080
+    assert mgr.snapshot_path.exists()
+
+
+def test_restore_if_needed_recovers_snapshot_from_previous_session(tmp_path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+    state = _default_gsettings_state()
+
+    monkeypatch.setattr(pm.shutil, "which", lambda _name: "/usr/bin/gsettings")
+    monkeypatch.setattr(pm.subprocess, "run", _fake_run_factory(state, calls))
+
+    first = SystemProxyManager(state_dir=tmp_path, session_id="session-a")
+    first.apply(
+        SystemProxyConfig(
+            http_host="127.0.0.1",
+            http_port=8080,
+            socks_host="127.0.0.1",
+            socks_port=1080,
+            bypass_hosts=["localhost", "127.0.0.0/8", "::1"],
+        )
+    )
+    assert first.snapshot_path.exists()
+
+    second = SystemProxyManager(state_dir=tmp_path, session_id="session-b")
+    restored = second.restore_if_needed()
+
+    assert restored is True
+    assert second.snapshot_path.exists() is False
+    assert state[("org.gnome.system.proxy", "mode")] == "'none'"
+
+
+def test_audit_runtime_detects_drift_and_reapplies(tmp_path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+    state = _default_gsettings_state()
+
+    monkeypatch.setattr(pm.shutil, "which", lambda _name: "/usr/bin/gsettings")
+    monkeypatch.setattr(pm.subprocess, "run", _fake_run_factory(state, calls))
+
+    cfg = SystemProxyConfig(
+        http_host="127.0.0.1",
+        http_port=8080,
+        socks_host="127.0.0.1",
+        socks_port=1080,
+        bypass_hosts=["localhost", "127.0.0.0/8", "::1"],
+    )
+    mgr = SystemProxyManager(state_dir=tmp_path)
+    mgr.apply(cfg)
+
+    # Simulate runtime drift from an external settings change.
+    state[("org.gnome.system.proxy", "mode")] = "'none'"
+
+    audit = mgr.audit_runtime(cfg, reconcile=False)
+    assert audit.matches_desired is False
+    assert audit.reapplied is False
+    assert any("mode expected='manual'" in item for item in audit.mismatches)
+
+    reconciled = mgr.audit_runtime(cfg, reconcile=True)
+    assert reconciled.matches_desired is True
+    assert reconciled.reapplied is True
+    assert reconciled.mismatches == ()
+    assert state[("org.gnome.system.proxy", "mode")] == "'manual'"
+
+
+def test_backend_warning_history_records_rc0_stderr_warning(monkeypatch) -> None:
+    pm._BACKEND_WARNING_HISTORY.clear()
+
+    monkeypatch.setattr(pm.shutil, "which", lambda _name: "/usr/bin/gsettings")
+
+    def fake_run(cmd, check, capture_output, text, timeout):  # noqa: ANN001
+        if cmd[:2] == ["gsettings", "list-keys"]:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout="mode\nignore-hosts\n",
+                stderr="libdconfsettings.so: undefined symbol: g_assertion_message_cmpnum",
+            )
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(pm.subprocess, "run", fake_run)
+
+    assert pm._gsettings_available() is True
+    warnings = pm.get_backend_warning_history(limit=10)
+    assert warnings
+    assert "undefined symbol" in warnings[-1].lower()
+
+
+def test_restore_if_needed_skips_snapshot_owned_by_live_other_pid(tmp_path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+    state = _default_gsettings_state()
+
+    monkeypatch.setattr(pm.shutil, "which", lambda _name: "/usr/bin/gsettings")
+    monkeypatch.setattr(pm.subprocess, "run", _fake_run_factory(state, calls))
+
+    sleeper = subprocess.Popen(["sleep", "30"])
+    try:
+        payload = {
+            "version": pm.SNAPSHOT_VERSION,
+            "backend": "gsettings",
+            "session_id": "live-owner",
+            "owner_pid": sleeper.pid,
+            "owner_created_at": int(time.time()),
+            "snapshot": {
+                "org.gnome.system.proxy": {
+                    "mode": "manual",
+                }
+            },
+        }
+        snap_path = tmp_path / pm.SNAPSHOT_FILE
+        snap_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        mgr = SystemProxyManager(state_dir=tmp_path, session_id="new-session")
+        restored = mgr.restore_if_needed()
+
+        assert restored is False
+        assert snap_path.exists()
+    finally:
+        sleeper.terminate()
+        sleeper.wait(timeout=5)
+
+
+def test_restore_if_owned_skips_snapshot_from_other_session(tmp_path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+    state = _default_gsettings_state()
+
+    monkeypatch.setattr(pm.shutil, "which", lambda _name: "/usr/bin/gsettings")
+    monkeypatch.setattr(pm.subprocess, "run", _fake_run_factory(state, calls))
+
+    snap_path = tmp_path / pm.SNAPSHOT_FILE
+    payload = {
+        "version": pm.SNAPSHOT_VERSION,
+        "backend": "gsettings",
+        "session_id": "other-session",
+        "owner_pid": 424242,
+        "snapshot": {
+            "org.gnome.system.proxy": {
+                "mode": "none",
+            }
+        },
+    }
+    snap_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    mgr = SystemProxyManager(state_dir=tmp_path, session_id="this-session")
+    status = mgr.restore_if_owned()
+
+    assert status is None
+    assert snap_path.exists()
