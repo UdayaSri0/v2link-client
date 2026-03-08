@@ -23,7 +23,9 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import time
 from typing import Any, Final, Literal, cast
+import uuid
 
 from v2link_client.core.errors import ProxyApplyError
 from v2link_client.core.storage import get_state_dir, load_json
@@ -39,7 +41,7 @@ except Exception:  # pragma: no cover - optional dependency in some environments
 logger = logging.getLogger(__name__)
 
 SNAPSHOT_FILE: Final[str] = "system_proxy_snapshot.json"
-SNAPSHOT_VERSION: Final[int] = 2
+SNAPSHOT_VERSION: Final[int] = 3
 
 ProxyBackendName = Literal["gio", "gsettings"]
 ValueKind = Literal["string", "bool", "int", "strv"]
@@ -70,6 +72,27 @@ class SystemProxyStatus:
     http_port: int
     socks_host: str
     socks_port: int
+
+
+@dataclass(frozen=True, slots=True)
+class SystemProxyAuditResult:
+    backend: ProxyBackendName
+    desired: SystemProxyStatus
+    actual: SystemProxyStatus
+    mismatches: tuple[str, ...]
+    reapplied: bool
+
+    @property
+    def matches_desired(self) -> bool:
+        return not self.mismatches
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotMeta:
+    version: int | None
+    backend: ProxyBackendName | None
+    session_id: str | None
+    owner_pid: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +160,16 @@ _SPEC_BY_PATH: Final[dict[str, _SettingSpec]] = {
 
 _GSETTINGS_KEY_CACHE: dict[str, set[str]] = {}
 _MISSING: Final[object] = object()
+_WARNING_KEYWORDS: Final[tuple[str, ...]] = (
+    "undefined symbol",
+    "failed to load",
+    "cannot open shared object file",
+    "dconf-warning",
+    "gsettings warning",
+    "gvfs",
+)
+_BACKEND_WARNING_HISTORY_LIMIT: Final[int] = 25
+_BACKEND_WARNING_HISTORY: list[str] = []
 
 
 def _parse_gsettings_str(raw: str) -> str:
@@ -308,6 +341,29 @@ def _format_cmd(cmd: list[str]) -> str:
         return str(cmd)
 
 
+def _stderr_has_backend_warnings(stderr: str) -> bool:
+    text = (stderr or "").strip().lower()
+    if not text:
+        return False
+    return any(keyword in text for keyword in _WARNING_KEYWORDS)
+
+
+def _record_backend_warning(message: str) -> None:
+    text = (message or "").strip()
+    if not text:
+        return
+    _BACKEND_WARNING_HISTORY.append(text)
+    overflow = len(_BACKEND_WARNING_HISTORY) - _BACKEND_WARNING_HISTORY_LIMIT
+    if overflow > 0:
+        del _BACKEND_WARNING_HISTORY[0:overflow]
+
+
+def get_backend_warning_history(*, limit: int = 10) -> list[str]:
+    if limit <= 0:
+        return []
+    return list(_BACKEND_WARNING_HISTORY[-limit:])
+
+
 def _run(cmd: list[str], *, timeout_s: float = 3.0) -> subprocess.CompletedProcess[str]:
     command_text = _format_cmd(cmd)
     logger.info("Running command: %s", command_text)
@@ -355,6 +411,11 @@ def _run(cmd: list[str], *, timeout_s: float = 3.0) -> subprocess.CompletedProce
             f"Command failed: {command_text}: {detail}",
             user_message=f"Failed to apply system proxy settings: {detail}",
         )
+
+    if stderr and _stderr_has_backend_warnings(stderr):
+        warning = f"{command_text}: {stderr}"
+        logger.warning("Command returned rc=0 with backend warning: %s", warning)
+        _record_backend_warning(warning)
 
     return result
 
@@ -768,25 +829,8 @@ def _read_status(backend: ProxyBackendName) -> SystemProxyStatus:
 
 def _verify_apply(backend: ProxyBackendName, cfg: SystemProxyConfig) -> SystemProxyStatus:
     status = _read_status(backend)
-
-    expected_http_host = (cfg.http_host or "").strip()
-    expected_socks_host = (cfg.socks_host or "").strip()
-    expected_http_port = int(cfg.http_port)
-    expected_socks_port = int(cfg.socks_port)
-
-    mismatches: list[str] = []
-    if status.mode != "manual":
-        mismatches.append(f"mode expected='manual' got={status.mode!r}")
-    if not status.http_enabled:
-        mismatches.append("http.enabled expected=true got=false")
-    if status.http_host != expected_http_host:
-        mismatches.append(f"http.host expected={expected_http_host!r} got={status.http_host!r}")
-    if status.http_port != expected_http_port:
-        mismatches.append(f"http.port expected={expected_http_port} got={status.http_port}")
-    if status.socks_host != expected_socks_host:
-        mismatches.append(f"socks.host expected={expected_socks_host!r} got={status.socks_host!r}")
-    if status.socks_port != expected_socks_port:
-        mismatches.append(f"socks.port expected={expected_socks_port} got={status.socks_port}")
+    desired = _runtime_desired_status(cfg)
+    mismatches = _status_mismatches(actual=status, desired=desired)
 
     if mismatches:
         detail = "; ".join(mismatches)
@@ -798,6 +842,85 @@ def _verify_apply(backend: ProxyBackendName, cfg: SystemProxyConfig) -> SystemPr
 
     logger.info("System proxy apply verification passed")
     return status
+
+
+def _runtime_desired_status(cfg: SystemProxyConfig) -> SystemProxyStatus:
+    return SystemProxyStatus(
+        mode="manual",
+        http_enabled=True,
+        http_host=(cfg.http_host or "").strip(),
+        http_port=int(cfg.http_port),
+        socks_host=(cfg.socks_host or "").strip(),
+        socks_port=int(cfg.socks_port),
+    )
+
+
+def _status_mismatches(*, actual: SystemProxyStatus, desired: SystemProxyStatus) -> list[str]:
+    mismatches: list[str] = []
+    if actual.mode != desired.mode:
+        mismatches.append(f"mode expected={desired.mode!r} got={actual.mode!r}")
+    if actual.http_enabled != desired.http_enabled:
+        expected = "true" if desired.http_enabled else "false"
+        got = "true" if actual.http_enabled else "false"
+        mismatches.append(f"http.enabled expected={expected} got={got}")
+    if actual.http_host != desired.http_host:
+        mismatches.append(f"http.host expected={desired.http_host!r} got={actual.http_host!r}")
+    if actual.http_port != desired.http_port:
+        mismatches.append(f"http.port expected={desired.http_port} got={actual.http_port}")
+    if actual.socks_host != desired.socks_host:
+        mismatches.append(f"socks.host expected={desired.socks_host!r} got={actual.socks_host!r}")
+    if actual.socks_port != desired.socks_port:
+        mismatches.append(f"socks.port expected={desired.socks_port} got={actual.socks_port}")
+    return mismatches
+
+
+def _to_snapshot_meta(data: Any) -> SnapshotMeta | None:
+    if not isinstance(data, dict):
+        return None
+
+    version_raw = data.get("version")
+    version = int(version_raw) if isinstance(version_raw, int) else None
+
+    backend_raw = data.get("backend")
+    backend: ProxyBackendName | None = None
+    if backend_raw in {"gio", "gsettings"}:
+        backend = cast(ProxyBackendName, backend_raw)
+
+    session_raw = data.get("session_id")
+    session_id = session_raw.strip() if isinstance(session_raw, str) and session_raw.strip() else None
+
+    owner_pid_raw = data.get("owner_pid")
+    owner_pid: int | None = None
+    if isinstance(owner_pid_raw, int):
+        owner_pid = owner_pid_raw
+    elif isinstance(owner_pid_raw, str):
+        try:
+            owner_pid = int(owner_pid_raw.strip())
+        except ValueError:
+            owner_pid = None
+    if owner_pid is not None and owner_pid <= 0:
+        owner_pid = None
+
+    return SnapshotMeta(
+        version=version,
+        backend=backend,
+        session_id=session_id,
+        owner_pid=owner_pid,
+    )
+
+
+def _process_is_alive(pid: int | None) -> bool:
+    if pid is None or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def _verify_restore(backend: ProxyBackendName, snapshot: dict[str, dict[str, Any]]) -> SystemProxyStatus:
@@ -839,13 +962,18 @@ def _verify_no_proxy(backend: ProxyBackendName) -> SystemProxyStatus:
 
 
 class SystemProxyManager:
-    def __init__(self, *, state_dir: Path | None = None) -> None:
+    def __init__(self, *, state_dir: Path | None = None, session_id: str | None = None) -> None:
         self._state_dir = state_dir or get_state_dir()
         self._backend: ProxyBackendName | None = _detect_backend()
+        self._session_id = (session_id or uuid.uuid4().hex).strip() or uuid.uuid4().hex
 
     @property
     def backend(self) -> ProxyBackendName | None:
         return self._backend
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
 
     @property
     def snapshot_path(self) -> Path:
@@ -853,6 +981,23 @@ class SystemProxyManager:
 
     def is_supported(self) -> bool:
         return self._backend is not None
+
+    def _load_snapshot_payload(self) -> dict[str, Any] | None:
+        if not self.snapshot_path.exists():
+            return None
+        data = load_json(self.snapshot_path, None)
+        if not isinstance(data, dict):
+            return None
+        return data
+
+    def read_snapshot_meta(self) -> SnapshotMeta | None:
+        return _to_snapshot_meta(self._load_snapshot_payload())
+
+    def snapshot_owned_by_current_session(self) -> bool:
+        meta = self.read_snapshot_meta()
+        if meta is None or meta.session_id is None:
+            return False
+        return meta.session_id == self._session_id
 
     def _ensure_backend(self, *, preferred: ProxyBackendName | None = None) -> ProxyBackendName:
         if self._backend is not None:
@@ -879,6 +1024,22 @@ class SystemProxyManager:
         """Restore system proxy if we have a snapshot from a previous run."""
         if not self.snapshot_path.exists():
             return False
+
+        meta = self.read_snapshot_meta()
+        if (
+            meta is not None
+            and meta.session_id is not None
+            and meta.session_id != self._session_id
+            and meta.owner_pid != os.getpid()
+            and _process_is_alive(meta.owner_pid)
+        ):
+            logger.warning(
+                "Skipping crash-recovery restore; snapshot appears owned by active session "
+                "(pid=%s session=%s)",
+                meta.owner_pid,
+                meta.session_id,
+            )
+            return False
         try:
             self.restore()
         except ProxyApplyError:
@@ -895,16 +1056,35 @@ class SystemProxyManager:
 
         # Prevent stacked snapshots across repeated applies.
         if self.snapshot_path.exists():
-            logger.info("Existing system proxy snapshot found; restoring before apply")
-            try:
-                self.restore()
-            except ProxyApplyError:
-                logger.exception("Failed to restore previous snapshot before apply; continuing")
+            meta = self.read_snapshot_meta()
+            skip_restore = (
+                meta is not None
+                and meta.session_id is not None
+                and meta.session_id != self._session_id
+                and meta.owner_pid != os.getpid()
+                and _process_is_alive(meta.owner_pid)
+            )
+            if skip_restore:
+                logger.warning(
+                    "Existing snapshot belongs to active session (pid=%s session=%s); "
+                    "skipping pre-apply restore",
+                    meta.owner_pid if meta is not None else None,
+                    meta.session_id if meta is not None else None,
+                )
+            else:
+                logger.info("Existing system proxy snapshot found; restoring before apply")
+                try:
+                    self.restore()
+                except ProxyApplyError:
+                    logger.exception("Failed to restore previous snapshot before apply; continuing")
 
         snapshot = _capture_snapshot(backend)
         payload: dict[str, Any] = {
             "version": SNAPSHOT_VERSION,
             "backend": backend,
+            "session_id": self._session_id,
+            "owner_pid": os.getpid(),
+            "owner_created_at": int(time.time()),
             "snapshot": snapshot,
         }
         _write_snapshot_atomic(self.snapshot_path, payload)
@@ -940,6 +1120,32 @@ class SystemProxyManager:
                         self.snapshot_path,
                     )
             raise
+
+    def audit_runtime(
+        self,
+        cfg: SystemProxyConfig,
+        *,
+        reconcile: bool,
+    ) -> SystemProxyAuditResult:
+        backend = self._ensure_backend()
+        desired = _runtime_desired_status(cfg)
+        actual = _read_status(backend)
+        mismatches = tuple(_status_mismatches(actual=actual, desired=desired))
+        reapplied = False
+
+        if mismatches and reconcile:
+            _apply_runtime_proxy(backend, cfg)
+            actual = _verify_apply(backend, cfg)
+            mismatches = ()
+            reapplied = True
+
+        return SystemProxyAuditResult(
+            backend=backend,
+            desired=desired,
+            actual=actual,
+            mismatches=mismatches,
+            reapplied=reapplied,
+        )
 
     def force_no_proxy(self, *, ignore_hosts: list[str] | None = None) -> SystemProxyStatus:
         backend = self._ensure_backend()
@@ -996,6 +1202,27 @@ class SystemProxyManager:
             logger.exception("Failed to remove system proxy snapshot: %s", self.snapshot_path)
 
         return status
+
+    def restore_if_owned(self) -> SystemProxyStatus | None:
+        if not self.snapshot_path.exists():
+            return None
+
+        meta = self.read_snapshot_meta()
+        if meta is None:
+            logger.warning("Skipping restore_if_owned: snapshot metadata unavailable")
+            return None
+        if meta.session_id is None:
+            logger.warning("Skipping restore_if_owned: snapshot has no session ownership marker")
+            return None
+        if meta.session_id != self._session_id:
+            logger.warning(
+                "Skipping restore_if_owned: snapshot belongs to another session (snapshot=%s current=%s)",
+                meta.session_id,
+                self._session_id,
+            )
+            return None
+
+        return self.restore()
 
     def repair_stale_loopback_proxy(self) -> bool:
         if self.snapshot_path.exists():

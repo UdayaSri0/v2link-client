@@ -1,17 +1,49 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export PYTHONPATH="${PYTHONPATH:-}:$(pwd)/src"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VENV_DIR="${ROOT_DIR}/.venv"
+VENV_PYTHON="${VENV_DIR}/bin/python"
+REQUIREMENTS_FILE="${ROOT_DIR}/requirements.txt"
 
-if [[ -x ".venv/bin/python" ]]; then
-  PYTHON_BIN=".venv/bin/python"
-elif command -v python3 >/dev/null 2>&1; then
-  PYTHON_BIN="python3"
-elif command -v python >/dev/null 2>&1; then
-  PYTHON_BIN="python"
-else
-  echo "Error: No python interpreter found (tried .venv/bin/python, python3, python)" >&2
+export PYTHONPATH="${ROOT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
+
+if [[ ! -x "${VENV_PYTHON}" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    BOOTSTRAP_PYTHON="python3"
+  elif command -v python >/dev/null 2>&1; then
+    BOOTSTRAP_PYTHON="python"
+  else
+    echo "Error: No python interpreter found (tried python3, python)" >&2
+    exit 1
+  fi
+
+  echo "Creating virtual environment at ${VENV_DIR}..."
+  "${BOOTSTRAP_PYTHON}" -m venv "${VENV_DIR}"
+fi
+
+PYTHON_BIN="${VENV_PYTHON}"
+
+if [[ ! -f "${REQUIREMENTS_FILE}" ]]; then
+  echo "Error: requirements file not found at ${REQUIREMENTS_FILE}" >&2
   exit 1
+fi
+
+if ! "${PYTHON_BIN}" - <<'PY'
+from importlib.util import find_spec
+import sys
+
+required = ("PyQt6", "platformdirs", "pydantic")
+missing = [name for name in required if find_spec(name) is None]
+sys.exit(0 if not missing else 1)
+PY
+then
+  echo "Installing Python dependencies into ${VENV_DIR}..."
+  if ! "${PYTHON_BIN}" -m pip --version >/dev/null 2>&1; then
+    "${PYTHON_BIN}" -m ensurepip --upgrade
+  fi
+  "${PYTHON_BIN}" -m pip install --upgrade pip
+  "${PYTHON_BIN}" -m pip install -r "${REQUIREMENTS_FILE}"
 fi
 
 if [[ "$(uname -s)" == "Linux" ]]; then
