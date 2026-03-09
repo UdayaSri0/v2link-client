@@ -8,8 +8,8 @@ import socket
 import tempfile
 import time
 
-from PyQt6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction
+from PyQt6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QAction, QDesktopServices
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -53,6 +53,7 @@ from v2link_client.core.process_manager import (
 )
 from v2link_client.core.speed_test import SpeedTestResult, run_speed_test_via_http_proxy
 from v2link_client.core.storage import get_config_dir, get_state_dir, load_json, save_json
+from v2link_client.core.update_check import UpdateCheckResult, check_for_updates
 from v2link_client.core.xray_api import TrafficStats, get_outbound_traffic
 from v2link_client.ui.diagnostics_widget import DiagnosticsWidget
 from v2link_client.ui.profile_dialogs import ProfileEditorDialog, ProfileManagerDialog
@@ -266,6 +267,7 @@ class MainWindow(QMainWindow):
         self._last_traffic_activity_at: float | None = None
         self._ping_in_flight = False
         self._speed_test_in_flight = False
+        self._update_check_in_flight = False
 
         profile_data = self._load_profile()
         self._load_saved_profiles(profile_data)
@@ -292,6 +294,9 @@ class MainWindow(QMainWindow):
 
     def _setup_menu(self) -> None:
         help_menu = self.menuBar().addMenu("&Help")
+        self.check_updates_action = QAction("Check for Updates…", self)
+        self.check_updates_action.triggered.connect(self._on_check_updates_clicked)
+        help_menu.addAction(self.check_updates_action)
         about_action = QAction("About", self)
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
@@ -310,6 +315,103 @@ class MainWindow(QMainWindow):
             "• Safer config saving with atomic writes"
         )
         QMessageBox.about(self, "About v2link-client", text)
+
+    def _set_update_check_busy(self, busy: bool) -> None:
+        self._update_check_in_flight = busy
+        self.check_updates_action.setEnabled(not busy)
+        self.check_updates_action.setText("Checking for Updates…" if busy else "Check for Updates…")
+
+    def _on_check_updates_clicked(self) -> None:
+        if self._update_check_in_flight:
+            return
+        self._set_update_check_busy(True)
+        self.diagnostics_widget.set_hint("Checking GitHub Releases for updates...")
+
+        def _run():
+            try:
+                return check_for_updates(__version__)
+            except AppError as exc:
+                raise RuntimeError(exc.user_message) from exc
+
+        worker = HealthCheckWorker(_run)
+        worker.signals.result.connect(self._on_update_check_result)
+        worker.signals.error.connect(self._on_update_check_error)
+        self._thread_pool.start(worker)
+
+    def _on_update_check_result(self, payload: object) -> None:
+        self._set_update_check_busy(False)
+        if not isinstance(payload, UpdateCheckResult):  # pragma: no cover - defensive
+            self.diagnostics_widget.set_hint("Update check failed: invalid response.")
+            QMessageBox.warning(self, "Update Check Failed", "Received an invalid update check response.")
+            return
+
+        if not payload.update_available:
+            self.diagnostics_widget.set_hint(
+                f"You're up to date (installed v{payload.current_version}, latest v{payload.latest_version})."
+            )
+            QMessageBox.information(
+                self,
+                "Check for Updates",
+                (
+                    "You're up to date.\n\n"
+                    f"Installed version: v{payload.current_version}\n"
+                    f"Latest release: v{payload.latest_version}"
+                ),
+            )
+            return
+
+        self.diagnostics_widget.set_hint(
+            f"Update available: v{payload.latest_version} (installed v{payload.current_version})."
+        )
+        self._show_update_available_dialog(payload)
+
+    def _on_update_check_error(self, message: str) -> None:
+        self._set_update_check_busy(False)
+        detail = (message or "Unknown error").strip()
+        logger.warning("Update check failed: %s", detail)
+        self.diagnostics_widget.set_hint(f"Update check failed: {detail}")
+        QMessageBox.warning(self, "Update Check Failed", detail)
+
+    def _show_update_available_dialog(self, result: UpdateCheckResult) -> None:
+        download_url = result.preferred_download_url or result.release_url
+
+        summary_lines = [
+            "A newer version is available.",
+            f"Installed: v{result.current_version}",
+            f"Latest: v{result.latest_version}",
+        ]
+        extra_lines: list[str] = []
+        if result.appimage_asset is not None:
+            extra_lines.append(f"AppImage: {result.appimage_asset.name}")
+        if result.deb_asset is not None:
+            extra_lines.append(f"Debian package: {result.deb_asset.name}")
+        if download_url:
+            extra_lines.append(f"Download link: {download_url}")
+
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Information)
+        dialog.setWindowTitle("Update Available")
+        dialog.setText("\n".join(summary_lines))
+        info_lines: list[str] = []
+        if result.notes:
+            info_lines.append(result.notes)
+        if extra_lines:
+            info_lines.append("\n".join(extra_lines))
+        if info_lines:
+            dialog.setInformativeText("\n\n".join(info_lines))
+
+        open_button = dialog.addButton("Open Download Page", QMessageBox.ButtonRole.AcceptRole)
+        copy_button = dialog.addButton("Copy Download Link", QMessageBox.ButtonRole.ActionRole)
+        dialog.addButton(QMessageBox.StandardButton.Close)
+        dialog.exec()
+
+        clicked = dialog.clickedButton()
+        if clicked == open_button:
+            QDesktopServices.openUrl(QUrl(result.release_url))
+            self.diagnostics_widget.set_hint("Opened release download page in your browser.")
+        elif clicked == copy_button:
+            QApplication.clipboard().setText(download_url)
+            self.diagnostics_widget.set_hint("Release download link copied to clipboard.")
 
     def _on_validate_clicked(self) -> None:
         self._reset_validation_state()
