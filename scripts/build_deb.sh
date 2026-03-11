@@ -53,11 +53,6 @@ detect_version() {
     return
   fi
 
-  if git -C "${ROOT_DIR}" describe --tags --exact-match >/dev/null 2>&1; then
-    git -C "${ROOT_DIR}" describe --tags --exact-match | sed 's/^v//'
-    return
-  fi
-
   if [[ -x "${ROOT_DIR}/.venv/bin/python" ]]; then
     PYTHON_BIN="${ROOT_DIR}/.venv/bin/python"
   elif command -v python3 >/dev/null 2>&1; then

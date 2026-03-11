@@ -4,10 +4,27 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Notes
+- No unreleased entries yet.
+
+## [0.1.9.0.4] - 2026-03-11
+
 ### Added
-- Help menu action `Check for Updates…` with asynchronous GitHub Releases lookup, version comparison, and update dialogs with open/copy download actions.
+- GitHub release update checks in-app (`Check for Updates…`) with release asset detection for AppImage and `.deb`.
+- Runtime system-proxy drift auditing and auto-reapply flow during active sessions.
+- Snapshot ownership metadata for safer system-proxy restore behavior across concurrent/stale sessions.
+- Saved-profile validation persistence metadata (`validated`, `validated_at`, `validation_fingerprint`) with backward-compatible profile loading.
+
+### Changed
+- Main window Help section now includes dedicated `Check Updates` and `About` buttons while preserving existing Help menu actions.
+- About dialog metadata was refreshed with current version, repository URL, and current feature highlights.
+- Release tooling now resolves version from `pyproject.toml` by default and exports a single build version to all packaging steps.
+- GitHub release workflow now verifies pushed tag version matches `pyproject.toml` before building artifacts.
 
 ### Fixed
+- Saved profile validation now survives restart when connection-defining profile data is unchanged.
+- Validation invalidation now only occurs when connection data changes; metadata edits (for example, profile name/notes) no longer force revalidation.
+- Long validation/status hints no longer force horizontal window growth; hint area remains width-stable with wrapping and tooltip fallback.
 - Hardened GNOME System Proxy lifecycle by adding runtime drift audits/reconciliation while Xray is running, so proxy mode/host/port are auto-corrected on mismatch instead of relying on one-time startup apply.
 - Added session ownership metadata to system proxy snapshots and ownership-aware restore paths to avoid false restore/no-proxy actions from non-owning sessions, while keeping crash recovery.
 - Improved diagnostics to report proxy backend, desired vs actual GNOME proxy state, local HTTP/SOCKS listener reachability, recent Xray traffic signal, last auto-reapply reason/time, and backend warning signals from `gsettings`/Gio stderr.

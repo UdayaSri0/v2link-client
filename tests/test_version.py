@@ -11,9 +11,18 @@ def _raise_not_found(_name: str) -> str:
 
 def test_get_semver_normalizes_installed_metadata(monkeypatch) -> None:
     monkeypatch.setattr(version_mod.metadata, "version", lambda _name: "v 0.1.9.0.0")
+    monkeypatch.setattr(version_mod, "_read_pyproject_version", lambda: None)
     version_mod.get_version.cache_clear()
 
     assert version_mod.get_semver() == "0.1.9.0.0"
+
+
+def test_get_semver_prefers_pyproject_over_installed_metadata(monkeypatch) -> None:
+    monkeypatch.setattr(version_mod.metadata, "version", lambda _name: "9.9.9.9.9")
+    monkeypatch.setattr(version_mod, "_read_pyproject_version", lambda: "0.1.9.0.4")
+    version_mod.get_version.cache_clear()
+
+    assert version_mod.get_semver() == "0.1.9.0.4"
 
 
 def test_get_semver_falls_back_to_env_version(monkeypatch) -> None:

@@ -11,8 +11,10 @@ import os
 import time
 import urllib.request
 
+from v2link_client.version import get_semver
 
-DEFAULT_USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) v2link-client/0.1"
+
+DEFAULT_USER_AGENT = f"Mozilla/5.0 (X11; Linux x86_64) v2link-client/{get_semver()}"
 DEFAULT_DOWNLOAD_BYTES = 10 * 1024 * 1024
 DEFAULT_UPLOAD_BYTES = 5 * 1024 * 1024
 
@@ -113,4 +115,3 @@ def run_speed_test_via_http_proxy(
             upload_time_s=ul_time_s,
             error=str(exc),
         )
-

@@ -65,6 +65,7 @@ from v2link_client.ui.theme import ThemeName, apply_theme, normalize_theme, them
 
 logger = logging.getLogger(__name__)
 
+PROJECT_REPOSITORY_URL = "https://github.com/UdayaSri0/v2link-client"
 PROFILE_FILE = "profile.json"
 XRAY_CONFIG_FILE = "xray_config.json"
 PROFILE_KEY_APPLY_SYSTEM_PROXY = "apply_system_proxy"
@@ -100,7 +101,7 @@ class HealthCheckWorker(QRunnable):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("v2link-client")
+        self.setWindowTitle(f"v2link-client v{__version__}")
         self.resize(900, 640)
 
         self._setup_menu()
@@ -328,15 +329,15 @@ class MainWindow(QMainWindow):
     def _show_about(self) -> None:
         text = (
             "<b>v2link-client</b><br>"
-            f"Version: {__version__}<br>"
+            f"Version: v{__version__}<br>"
             f"Author: {__author__}<br><br>"
-            "Linux desktop client for V2Ray-style links (VLESS) built with Python + PyQt6.<br>"
-            "Powered by Xray-core.<br><br>"
-            "<b>What's New</b><br>"
-            "• Save multiple VPN URLs as profiles<br>"
-            "• Quickly switch profiles from dropdown<br>"
-            "• Manage profiles (edit/delete/default)<br>"
-            "• Safer config saving with atomic writes"
+            f"Repository: {PROJECT_REPOSITORY_URL}<br><br>"
+            "Linux desktop client for V2Ray-style links powered by Xray-core.<br><br>"
+            "<b>Highlights</b><br>"
+            "• Saved profiles with validation persistence across restarts<br>"
+            "• Profile manager with default/favorite/edit/duplicate actions<br>"
+            "• Runtime diagnostics and system proxy drift reconciliation<br>"
+            "• Update checks for GitHub releases (.AppImage and .deb)"
         )
         QMessageBox.about(self, "About v2link-client", text)
 
