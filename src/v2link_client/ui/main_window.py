@@ -38,7 +38,11 @@ from v2link_client.core.health_check import ProxyHealthResult, check_http_proxy
 from v2link_client.core.humanize import format_bytes, format_duration_s, format_mbps
 from v2link_client.core.link_parser import parse_link
 from v2link_client.core.net_probe import ServerPingResult, ping_server
-from v2link_client.core.profile_store import Profile, ProfileStore
+from v2link_client.core.profile_store import (
+    Profile,
+    ProfileStore,
+    connection_fingerprint,
+)
 from v2link_client.core.proxy_manager import (
     SystemProxyAuditResult,
     SystemProxyConfig,
@@ -157,6 +161,14 @@ class MainWindow(QMainWindow):
         self.theme_selector.setFixedWidth(120)
         self.theme_selector.setToolTip("Switch theme")
 
+        self.check_updates_button = QPushButton("Check Updates")
+        self.check_updates_button.clicked.connect(self._on_check_updates_clicked)
+        self.check_updates_button.setProperty("variant", "ghost")
+
+        self.about_button = QPushButton("About")
+        self.about_button.clicked.connect(self._show_about)
+        self.about_button.setProperty("variant", "ghost")
+
         profile_row = QHBoxLayout()
         profile_row.setSpacing(10)
         profile_row.addWidget(QLabel("Profile"))
@@ -198,6 +210,13 @@ class MainWindow(QMainWindow):
         metrics_row.addWidget(self.speed_label, 1)
         metrics_row.addWidget(self.traffic_label)
 
+        help_row = QHBoxLayout()
+        help_row.setSpacing(10)
+        help_row.addWidget(QLabel("Help"))
+        help_row.addStretch(1)
+        help_row.addWidget(self.check_updates_button)
+        help_row.addWidget(self.about_button)
+
         self.diagnostics_widget = DiagnosticsWidget()
 
         layout = QVBoxLayout()
@@ -207,6 +226,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(top_row)
         layout.addLayout(control_row)
         layout.addLayout(metrics_row)
+        layout.addLayout(help_row)
         layout.addWidget(self.diagnostics_widget, 1)
 
         central.setLayout(layout)
@@ -214,6 +234,8 @@ class MainWindow(QMainWindow):
         self._process = XrayProcessManager()
         self._validated_config_path = None
         self._validated_link = None
+        self._validated_fingerprint: str | None = None
+        self._validated_profile_id: str | None = None
         self._socks_port = DEFAULT_SOCKS_PORT
         self._http_port = DEFAULT_HTTP_PORT
         self._api_port: int | None = None
@@ -271,10 +293,12 @@ class MainWindow(QMainWindow):
 
         profile_data = self._load_profile()
         self._load_saved_profiles(profile_data)
+        self.link_input.textChanged.connect(self._on_link_input_changed)
         self.profile_selector.currentIndexChanged.connect(self._on_profile_selected)
         self.system_proxy_checkbox.toggled.connect(self._on_system_proxy_toggled)
         self._apply_theme(self._theme, persist=False)
         self.theme_selector.currentTextChanged.connect(self._on_theme_changed)
+        self._reconcile_runtime_validation_for_current_link(announce_restored=True)
 
         # If the app previously applied system proxy and crashed, attempt to restore.
         try:
@@ -297,9 +321,9 @@ class MainWindow(QMainWindow):
         self.check_updates_action = QAction("Check for Updates…", self)
         self.check_updates_action.triggered.connect(self._on_check_updates_clicked)
         help_menu.addAction(self.check_updates_action)
-        about_action = QAction("About", self)
-        about_action.triggered.connect(self._show_about)
-        help_menu.addAction(about_action)
+        self.about_action = QAction("About", self)
+        self.about_action.triggered.connect(self._show_about)
+        help_menu.addAction(self.about_action)
 
     def _show_about(self) -> None:
         text = (
@@ -320,6 +344,8 @@ class MainWindow(QMainWindow):
         self._update_check_in_flight = busy
         self.check_updates_action.setEnabled(not busy)
         self.check_updates_action.setText("Checking for Updates…" if busy else "Check for Updates…")
+        self.check_updates_button.setEnabled(not busy)
+        self.check_updates_button.setText("Checking..." if busy else "Check Updates")
 
     def _on_check_updates_clicked(self) -> None:
         if self._update_check_in_flight:
@@ -430,27 +456,27 @@ class MainWindow(QMainWindow):
             return
 
         saved_profile = self._handle_profile_save_after_validation(raw_link, parsed_link)
-        if saved_profile is not None:
-            self._selected_profile_id = saved_profile.id
-            self._refresh_profile_selector(select_profile_id=saved_profile.id)
-        else:
-            existing = self._profile_store.find_by_url(raw_link)
-            if existing is not None:
-                self._selected_profile_id = existing.id
-                self._refresh_profile_selector(select_profile_id=existing.id)
+        validation_profile = saved_profile
+        if validation_profile is None:
+            validation_profile = self._profile_store.find_by_url(raw_link)
+        if validation_profile is not None:
+            marked_profile = self._profile_store.mark_profile_validated(validation_profile.id)
+            if marked_profile is not None:
+                validation_profile = marked_profile
+            self._selected_profile_id = validation_profile.id
+            self._refresh_profile_selector(select_profile_id=validation_profile.id)
 
         self._save_profile_preferences(link=raw_link)
-        self._process = XrayProcessManager(xray)
-        self._validated_config_path = config_path
-        self._validated_link = parsed_link
-        self._socks_port = socks_port
-        self._http_port = http_port
-        self._api_port = api_port
-        self.diagnostics_widget.set_proxy_ports(
-            socks_port=self._socks_port, http_port=self._http_port
+        self._set_runtime_validation_state(
+            parsed_link=parsed_link,
+            config_path=config_path,
+            socks_port=socks_port,
+            http_port=http_port,
+            api_port=api_port,
+            profile_id=validation_profile.id if validation_profile is not None else None,
+            fingerprint=connection_fingerprint(raw_link),
+            xray=xray,
         )
-        self.start_stop_button.setEnabled(True)
-        self.ping_button.setEnabled(True)
 
         hint = (
             f"Validated: {parsed_link.display_name()}. "
@@ -461,7 +487,7 @@ class MainWindow(QMainWindow):
             hint = f"{hint}  Warning: {warning}"
         if saved_profile is not None:
             hint = f"{hint} Profile saved: {saved_profile.name}."
-        elif self._profile_store.find_by_url(raw_link) is not None:
+        elif validation_profile is not None:
             hint = f"{hint} Using existing saved profile."
         else:
             hint = f"{hint} URL validated but not saved as a profile."
@@ -472,6 +498,8 @@ class MainWindow(QMainWindow):
         self.status_label.setText("STOPPED")
         self._validated_config_path = None
         self._validated_link = None
+        self._validated_fingerprint = None
+        self._validated_profile_id = None
         self.start_stop_button.setEnabled(False)
         self.ping_button.setEnabled(False)
         self.speed_test_button.setEnabled(False)
@@ -485,6 +513,135 @@ class MainWindow(QMainWindow):
         self._last_traffic_activity_at = None
         self._set_metrics_defaults()
         self._update_diagnostics_runtime_state()
+
+    def _set_runtime_validation_state(
+        self,
+        *,
+        parsed_link: object,
+        config_path: Path,
+        socks_port: int,
+        http_port: int,
+        api_port: int,
+        profile_id: str | None,
+        fingerprint: str | None,
+        xray: object | None = None,
+    ) -> None:
+        if xray is None:
+            self._process = XrayProcessManager()
+        else:
+            self._process = XrayProcessManager(xray)
+        self._validated_config_path = config_path
+        self._validated_link = parsed_link
+        self._validated_profile_id = profile_id
+        self._validated_fingerprint = fingerprint
+        self._socks_port = socks_port
+        self._http_port = http_port
+        self._api_port = api_port
+        self.diagnostics_widget.set_proxy_ports(
+            socks_port=self._socks_port,
+            http_port=self._http_port,
+        )
+        self.start_stop_button.setEnabled(True)
+        self.ping_button.setEnabled(True)
+
+    def _profile_for_current_link(self) -> Profile | None:
+        current_url = self.link_input.text().strip()
+        if not current_url:
+            return None
+
+        if self._selected_profile_id:
+            selected = self._profile_store.get_by_id(self._selected_profile_id)
+            if selected is not None and selected.url.strip() == current_url:
+                return selected
+        return self._profile_store.find_by_url(current_url)
+
+    def _prepare_runtime_config(self, raw_link: str) -> tuple[object, Path, int, int, int]:
+        parsed_link = parse_link(raw_link)
+        socks_port, http_port, api_port = self._pick_proxy_ports()
+        config = build_xray_config(
+            parsed_link,
+            socks_port=socks_port,
+            http_port=http_port,
+            api_port=api_port,
+        )
+        config_path = get_state_dir() / XRAY_CONFIG_FILE
+        save_json(config_path, config)
+        return parsed_link, config_path, socks_port, http_port, api_port
+
+    def _restore_saved_validation(self, *, announce: bool) -> bool:
+        raw_link = self.link_input.text().strip()
+        if not raw_link:
+            return False
+
+        profile = self._profile_for_current_link()
+        if profile is None:
+            return False
+        if not self._profile_store.is_profile_validation_current(profile):
+            return False
+
+        fingerprint = connection_fingerprint(raw_link)
+        if not fingerprint or profile.validation_fingerprint != fingerprint:
+            return False
+
+        if self._validated_fingerprint == fingerprint and self._validated_link is not None:
+            self._validated_profile_id = profile.id
+            self.start_stop_button.setEnabled(True)
+            self.ping_button.setEnabled(True)
+            return True
+
+        try:
+            parsed_link, config_path, socks_port, http_port, api_port = self._prepare_runtime_config(raw_link)
+        except AppError as exc:
+            self._profile_store.clear_profile_validation(profile.id)
+            self.diagnostics_widget.set_hint(
+                f"Saved validation expired for '{profile.name}': {exc.user_message}"
+            )
+            return False
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("Failed to restore saved validation for profile %s", profile.id)
+            self._profile_store.clear_profile_validation(profile.id)
+            self.diagnostics_widget.set_hint(
+                f"Saved validation expired for '{profile.name}': {exc}"
+            )
+            return False
+
+        self._set_runtime_validation_state(
+            parsed_link=parsed_link,
+            config_path=config_path,
+            socks_port=socks_port,
+            http_port=http_port,
+            api_port=api_port,
+            profile_id=profile.id,
+            fingerprint=fingerprint,
+        )
+        if announce:
+            self.diagnostics_widget.set_hint(f"Loaded validated profile '{profile.name}'. Ready to start.")
+        self._set_health_state("offline", "Not running")
+        return True
+
+    def _reconcile_runtime_validation_for_current_link(self, *, announce_restored: bool = False) -> None:
+        if self._process.is_running():
+            return
+        raw_link = self.link_input.text().strip()
+        current_fingerprint = connection_fingerprint(raw_link)
+        if (
+            self._validated_link is not None
+            and self._validated_fingerprint
+            and current_fingerprint
+            and self._validated_fingerprint == current_fingerprint
+        ):
+            self.start_stop_button.setEnabled(True)
+            self.ping_button.setEnabled(True)
+            return
+
+        if self._restore_saved_validation(announce=announce_restored):
+            return
+
+        if self._validated_link is not None or self._validated_config_path is not None:
+            self._reset_validation_state()
+
+    def _on_link_input_changed(self, _value: str) -> None:
+        self._reconcile_runtime_validation_for_current_link()
 
     def _validate_link(
         self, raw_link: str, *, persist_runtime_config: bool
@@ -868,15 +1025,18 @@ class MainWindow(QMainWindow):
         profile_id = self.profile_selector.itemData(index)
         if not isinstance(profile_id, str):
             self._selected_profile_id = None
+            self._reconcile_runtime_validation_for_current_link()
             return
 
         profile = self._profile_store.get_by_id(profile_id)
         if profile is None:
             self._selected_profile_id = None
+            self._reconcile_runtime_validation_for_current_link()
             return
 
         self._selected_profile_id = profile.id
         self.link_input.setText(profile.url)
+        self._reconcile_runtime_validation_for_current_link()
 
     def _on_manage_profiles_clicked(self) -> None:
         dialog = ProfileManagerDialog(
@@ -897,6 +1057,8 @@ class MainWindow(QMainWindow):
             default_profile = self._profile_store.get_default()
             if default_profile is not None:
                 self._set_selected_profile(default_profile.id, populate_url=True)
+
+        self._reconcile_runtime_validation_for_current_link()
 
     def _mark_profile_last_used(self) -> None:
         current_url = self.link_input.text().strip()
@@ -942,6 +1104,8 @@ class MainWindow(QMainWindow):
             self.theme_selector,
             self.manage_profiles_button,
             self.profile_selector,
+            self.check_updates_button,
+            self.about_button,
         ):
             self._refresh_style(widget)
 

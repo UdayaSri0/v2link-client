@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ import tempfile
 from typing import Any
 from uuid import uuid4
 
+from v2link_client.core.link_parser import parse_link
 from v2link_client.core.storage import get_config_dir
 
 PROFILES_SCHEMA_VERSION = 1
@@ -41,6 +43,43 @@ def basic_url_prefix_valid(url: str) -> bool:
     return bool(_URL_PREFIX_RE.match((url or "").strip()))
 
 
+def connection_fingerprint(url: str) -> str | None:
+    """Stable hash for connection-defining URL content."""
+    raw = (url or "").strip()
+    if not raw:
+        return None
+    try:
+        link = parse_link(raw)
+    except Exception:
+        payload_data: dict[str, Any] = {"url": raw}
+    else:
+        payload_data = {
+            "scheme": link.scheme,
+            "user_id": link.user_id,
+            "host": link.host,
+            "port": int(link.port),
+            "encryption": link.encryption,
+            "security": link.security,
+            "transport": link.transport,
+            "sni": link.sni,
+            "fingerprint": link.fingerprint,
+            "allow_insecure": bool(link.allow_insecure),
+            "header_type": link.header_type,
+            "path": link.path,
+            "ws_host": link.ws_host,
+            "grpc_service_name": link.grpc_service_name,
+            "flow": link.flow,
+            "alpn": list(link.alpn) if link.alpn else [],
+        }
+    payload = json.dumps(
+        payload_data,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class Profile:
     id: str
@@ -52,6 +91,9 @@ class Profile:
     last_used_at: str | None
     favorite: bool = False
     notes: str = ""
+    validated: bool = False
+    validated_at: str | None = None
+    validation_fingerprint: str | None = None
 
     @classmethod
     def create(
@@ -90,6 +132,17 @@ class Profile:
             notes = str(data.get("notes", "")).strip()
             favorite = bool(data.get("favorite", False))
             protocol = str(data.get("protocol", "")).strip().lower() or detect_protocol(url)
+            validated = bool(data.get("validated", False))
+            validated_at_raw = data.get("validated_at")
+            validated_at = (
+                None if validated_at_raw in {None, ""} else str(validated_at_raw).strip()
+            )
+            validation_fingerprint_raw = data.get("validation_fingerprint")
+            validation_fingerprint = (
+                None
+                if validation_fingerprint_raw in {None, ""}
+                else str(validation_fingerprint_raw).strip()
+            )
         except Exception:
             return None
 
@@ -104,6 +157,17 @@ class Profile:
         if protocol not in KNOWN_PROTOCOLS:
             protocol = "unknown"
 
+        current_fingerprint = connection_fingerprint(url)
+        if (
+            not validated
+            or not validation_fingerprint
+            or not current_fingerprint
+            or validation_fingerprint != current_fingerprint
+        ):
+            validated = False
+            validated_at = None
+            validation_fingerprint = None
+
         return cls(
             id=profile_id,
             name=name,
@@ -114,6 +178,9 @@ class Profile:
             last_used_at=last_used_at,
             favorite=favorite,
             notes=notes,
+            validated=validated,
+            validated_at=validated_at,
+            validation_fingerprint=validation_fingerprint,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -127,6 +194,9 @@ class Profile:
             "last_used_at": self.last_used_at,
             "favorite": self.favorite,
             "notes": self.notes,
+            "validated": self.validated,
+            "validated_at": self.validated_at,
+            "validation_fingerprint": self.validation_fingerprint,
         }
 
 
@@ -218,16 +288,38 @@ class ProfileStore:
         return profile
 
     def update_profile(self, profile: Profile) -> Profile:
-        updated = replace(
-            profile,
-            name=profile.name.strip(),
-            url=profile.url.strip(),
-            notes=profile.notes.strip(),
-            protocol=detect_protocol(profile.url),
-            updated_at=_now_iso(),
-        )
         for idx, current in enumerate(self.profiles):
-            if current.id == updated.id:
+            if current.id == profile.id:
+                cleaned_url = profile.url.strip()
+                prior_fingerprint = connection_fingerprint(current.url)
+                next_fingerprint = connection_fingerprint(cleaned_url)
+                connection_changed = prior_fingerprint != next_fingerprint
+
+                validated = (
+                    current.validated
+                    and current.validation_fingerprint is not None
+                    and current.validation_fingerprint == next_fingerprint
+                )
+                validated_at = current.validated_at if validated else None
+                validation_fingerprint = (
+                    current.validation_fingerprint if validated else None
+                )
+                if connection_changed:
+                    validated = False
+                    validated_at = None
+                    validation_fingerprint = None
+
+                updated = replace(
+                    profile,
+                    name=profile.name.strip(),
+                    url=cleaned_url,
+                    notes=profile.notes.strip(),
+                    protocol=detect_protocol(cleaned_url),
+                    updated_at=_now_iso(),
+                    validated=validated,
+                    validated_at=validated_at,
+                    validation_fingerprint=validation_fingerprint,
+                )
                 self.profiles[idx] = updated
                 self.save()
                 return updated
@@ -275,6 +367,60 @@ class ProfileStore:
             return
         updated = replace(current, last_used_at=_now_iso(), updated_at=_now_iso())
         self.update_profile(updated)
+
+    def is_profile_validation_current(self, profile: Profile) -> bool:
+        current_fingerprint = connection_fingerprint(profile.url)
+        return bool(
+            profile.validated
+            and profile.validation_fingerprint
+            and current_fingerprint
+            and profile.validation_fingerprint == current_fingerprint
+        )
+
+    def mark_profile_validated(self, profile_id: str) -> Profile | None:
+        current = self.get_by_id(profile_id)
+        if current is None:
+            return None
+
+        fingerprint = connection_fingerprint(current.url)
+        if not fingerprint:
+            return None
+
+        updated = replace(
+            current,
+            validated=True,
+            validated_at=_now_iso(),
+            validation_fingerprint=fingerprint,
+            updated_at=_now_iso(),
+        )
+        for idx, existing in enumerate(self.profiles):
+            if existing.id == profile_id:
+                self.profiles[idx] = updated
+                self.save()
+                return updated
+        return None
+
+    def clear_profile_validation(self, profile_id: str) -> Profile | None:
+        current = self.get_by_id(profile_id)
+        if current is None:
+            return None
+
+        if not current.validated and not current.validated_at and not current.validation_fingerprint:
+            return current
+
+        updated = replace(
+            current,
+            validated=False,
+            validated_at=None,
+            validation_fingerprint=None,
+            updated_at=_now_iso(),
+        )
+        for idx, existing in enumerate(self.profiles):
+            if existing.id == profile_id:
+                self.profiles[idx] = updated
+                self.save()
+                return updated
+        return None
 
     def _atomic_write_json(self, data: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
