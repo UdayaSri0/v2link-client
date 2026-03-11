@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -57,6 +58,10 @@ class DiagnosticsWidget(QWidget):
         self.hint_label = QLabel("")
         self.hint_label.setProperty("role", "hint")
         self.hint_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.hint_label.setWordWrap(True)
+        self.hint_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.hint_label.setMinimumHeight(40)
+        self.hint_label.setMaximumHeight(40)
 
         self.text_area = QTextEdit()
         self.text_area.setReadOnly(True)
@@ -92,6 +97,7 @@ class DiagnosticsWidget(QWidget):
 
     def set_hint(self, text: str) -> None:
         self.hint_label.setText(text)
+        self.hint_label.setToolTip(text if text else "")
 
     def set_proxy_ports(self, *, socks_port: int, http_port: int) -> None:
         self._socks_port = socks_port

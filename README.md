@@ -1,8 +1,10 @@
 # v2link-client
 
-Linux desktop client for V2Ray-style links built with Python 3.11+ and PyQt6.
+Linux desktop client for V2Ray-style links, built with Python 3.11+ and PyQt6, powered by Xray-core.
 
-Current status: **early beta** — the app currently supports **`vless://`** links (a useful subset) and runs **Xray-core** under the hood.
+Current release target: **v0.1.9.0.4**
+
+Project status: **beta** (stable for daily use, focused feature scope).
 
 ## Screenshots
 
@@ -14,38 +16,56 @@ Current status: **early beta** — the app currently supports **`vless://`** lin
   <img src="images/app-light.png" width="900" alt="v2link-client (Light)" />
 </p>
 
-## Features
+## Key Features
 
-- Paste a `vless://` link → validate → start/stop the core
-- Save multiple VPN URLs as named profiles (favorite/default supported)
-- Profile dropdown + manager dialog (add/edit/delete/duplicate/set default)
-- Ping server (TCP/TLS) + built-in speed test (through the tunnel)
-- Live session metrics: uptime, upload/download speed, total traffic used
-- Local proxy inbounds:
-  - SOCKS5 on `127.0.0.1:<port>`
-  - HTTP proxy on `127.0.0.1:<port>`
-- Connectivity indicator: `CONNECTING` / `ONLINE` / `DEGRADED` / `OFFLINE`
-- Built-in diagnostics and log access
-- About dialog (Help -> About)
-- Light/Dark theme toggle (saved to your profile)
+- Validate and run `vless://` links through Xray-core
+- Save/manage multiple profiles (favorite/default/duplicate/edit/delete)
+- Validation persistence for saved profiles (no unnecessary revalidation)
+- Local SOCKS5 + HTTP proxy endpoints (auto-select free ports when needed)
+- Optional desktop system-proxy apply/restore while running
+- Health indicator + ping + speed test + traffic/uptime metrics
+- Diagnostics panel with runtime proxy state and log access
+- Built-in update check against GitHub Releases
+- Light/Dark theme
 
-## Requirements (runtime)
+## Runtime Requirements
 
-- Linux desktop (GNOME/KDE/etc.)
-- **Xray-core** available in your `PATH` (`xray version` should work)
+- Linux desktop environment (GNOME/KDE/etc.)
+- `xray` available in `PATH`
 
-## Installation (download release)
+Quick check:
 
-1) Open GitHub Releases and download the latest `*.AppImage` file.
+```bash
+xray version
+```
 
-2) Make it executable and run it:
+## Supported Install Methods
+
+Primary supported release artifacts:
+
+1. **AppImage**
+2. **Debian package (`.deb`)**
+
+Also available for Debian/Ubuntu users:
+
+3. **APT repository** (published from release workflow)
+
+## Install from AppImage
+
+1. Download the latest AppImage from GitHub Releases.
+
+Expected artifact name pattern:
+- `v2link-client-<version>-linux-<arch>.AppImage`
+- `<arch>` is `x86_64` or `aarch64`
+
+2. Make executable and run:
 
 ```bash
 chmod +x v2link-client-*.AppImage
 ./v2link-client-*.AppImage
 ```
 
-3) (Optional) Add launcher entry:
+3. Optional launcher setup:
 
 ```bash
 mkdir -p ~/.local/bin
@@ -65,13 +85,30 @@ Categories=Network;
 Terminal=false
 ```
 
-Replace `YOUR_USER` with your Linux username.
+## Install from `.deb`
 
-If `xray version` fails, install Xray-core first and re-run the app.
+1. Download the latest `.deb` from GitHub Releases.
 
-## Install via apt
+Expected artifact name pattern:
+- `v2link-client_<version>_<arch>.deb`
+- `<arch>` is `amd64` or `arm64`
 
-Add the repository signing key:
+2. Install:
+
+```bash
+sudo dpkg -i v2link-client_<version>_amd64.deb
+sudo apt -f install
+```
+
+3. Launch:
+
+```bash
+v2link-client
+```
+
+## Install via APT Repository (Optional)
+
+Import the repository key:
 
 ```bash
 curl -fsSL https://udayasri0.github.io/v2link-client/apt/public.key \
@@ -79,7 +116,7 @@ curl -fsSL https://udayasri0.github.io/v2link-client/apt/public.key \
   | sudo tee /usr/share/keyrings/v2link-client-archive-keyring.gpg >/dev/null
 ```
 
-Add the APT source:
+Add the source list:
 
 ```bash
 echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/v2link-client-archive-keyring.gpg] https://udayasri0.github.io/v2link-client/apt stable main" \
@@ -93,195 +130,126 @@ sudo apt update
 sudo apt install v2link-client
 ```
 
-## Installation (.deb package)
-
-1) Open GitHub Releases and download the latest `v2link-client_<version>_amd64.deb` (or `arm64`) package.
-
-2) Install it:
-
-```bash
-sudo dpkg -i v2link-client_<version>_amd64.deb
-```
-
-3) Fix missing dependencies (if prompted):
-
-```bash
-sudo apt -f install
-```
-
-4) Launch from your app menu or run:
-
-```bash
-v2link-client
-```
-
-## Installation (run from source)
-
-1) Install system packages (Ubuntu/Debian):
-
-```bash
-sudo apt update
-sudo apt install -y python3-venv python3-pip
-```
-
-2) Install Xray-core:
-
-```bash
-xray version
-```
-
-If that command fails, install `xray` using your distro’s package manager or from the upstream project and make sure it’s on your `PATH`.
-
-3) Create a virtual environment and install Python dependencies:
+## Run from Source
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
-```
-
-4) Run the app:
-
-```bash
 ./scripts/dev_run.sh
 ```
 
-## Release process (maintainers)
+## Local Build Instructions
 
-Build artifacts locally:
+Build AppImage only:
+
+```bash
+./scripts/build_appimage.sh
+```
+
+Build `.deb` only:
+
+```bash
+./scripts/build_deb.sh
+```
+
+Build full release set (PyInstaller + AppImage + `.deb` + checksums):
 
 ```bash
 ./scripts/build_release.sh
 ```
 
-Outputs are written to `dist/`:
+Artifacts are written to `dist/`:
+
 - `v2link-client-<version>-linux-<arch>.AppImage`
 - `v2link-client_<version>_<arch>.deb`
 - `SHA256SUMS`
 
-Publish on GitHub:
+## Release Process (Maintainers)
+
+Canonical version source: `pyproject.toml` (`[project].version`).
+
+1. Update `pyproject.toml` version.
+2. Update `CHANGELOG.md`.
+3. Commit changes.
+4. Create and push matching tag:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v<version>
+git push origin v<version>
 ```
 
-Tag pushes matching `v*` trigger `.github/workflows/release.yml`, which builds AppImage + `.deb` artifacts and uploads them to the GitHub Release automatically.
-The same workflow also builds a signed APT repository (using `reprepro`) and publishes it to the `gh-pages` branch.
+5. GitHub Actions workflow `.github/workflows/release.yml` will:
+- verify `tag version == pyproject version`
+- build AppImage + `.deb` + `SHA256SUMS`
+- upload artifacts to GitHub Release
+- publish/update signed APT repo to `gh-pages`
 
-### APT signing key setup (maintainers)
+## APT Signing Key Setup (Maintainers)
 
-The APT repo signing key public half is committed at `apt/public.key`.
-Export the matching private key and store it in GitHub repository secrets:
+Public key file is committed at `apt/public.key`.
+
+Export matching private key:
 
 ```bash
 gpg --armor --export-secret-keys "v2link-client APT Repository <apt@v2link-client.local>"
 ```
 
-- Save the ASCII-armored output as secret `APT_GPG_PRIVATE_KEY`
-- If your key is passphrase-protected, save that passphrase as `APT_GPG_PASSPHRASE`
+GitHub secrets:
+
+- `APT_GPG_PRIVATE_KEY`: ASCII-armored private key
+- `APT_GPG_PASSPHRASE`: key passphrase (if protected)
 
 ## Usage
 
-1) Paste your `vless://` link.
-2) Click **Validate & Save**.
-3) Click **Start**.
-4) To proxy the whole system, enable **System Proxy** (recommended).  
-   If you prefer manual setup, configure your browser/app to use the proxy:
-   - Click **Copy manual proxy settings** in the app and paste them where needed.
+1. Paste `vless://` link.
+2. Click **Validate & Save**.
+3. Click **Start**.
+4. Enable **System Proxy** for desktop-wide proxying, or use **Copy manual proxy settings**.
 
-Notes:
-- The app defaults to SOCKS5 `127.0.0.1:1080` and HTTP `127.0.0.1:8080`, but will pick free ports if those are busy.
-- The selected theme is saved in your profile and restored on next launch.
-- System proxy auto-apply currently targets GNOME/libproxy via `gsettings`. Other desktops may require manual proxy setup.
+## Supported Link Scope
 
-## Saved Profiles (URLs)
+Currently implemented:
 
-Saved Profiles let you store multiple VPN share links and quickly reuse them.
+- `vless://`
+- `security=tls` and `security=none`
+- transport: `tcp`, `ws`, `grpc`
+- optional: `sni`, `fp`, `alpn`, `allowInsecure`, `flow`
+- limited `headerType=http` handling for TCP
 
-- Create a profile:
-  - Paste a URL, click **Validate & Save**, then enter a profile name and save.
-  - If the URL already exists, the app offers **Update Profile** or **Save as New**.
-- Switch profiles:
-  - Use the **Profile** dropdown to load any saved profile URL into the input field.
-- Manage profiles:
-  - Click **Manage** next to the profile dropdown.
-  - From Profile Manager you can Add/Edit/Delete profiles, Set Default, Duplicate, and toggle Favorite.
-- Default profile:
-  - The default profile is auto-selected on app start and its URL is loaded automatically.
-- Storage location:
-  - `profiles.json` is stored at `$XDG_CONFIG_HOME/v2link-client/profiles.json`.
-  - If `XDG_CONFIG_HOME` is unset, fallback is `~/.config/v2link-client/profiles.json`.
-- Migration:
-  - On first launch after upgrading, an older single saved URL (from `profile.json`) is auto-imported as an `Imported Profile` and set as default.
+Not yet implemented:
 
-## Supported link subset (today)
-
-`vless://` with:
-- `security=tls` or `security=none`
-- transports: `type=tcp`, `type=ws`, `type=grpc`
-- optional: `sni`, `fp` (fingerprint), `alpn`, `allowInsecure`, `flow`
-- TCP `headerType=none` (and limited support for `headerType=http`)
-
-Not supported yet:
 - `vmess://`, `trojan://`, `ss://`
-- REALITY, advanced XTLS options, complex routing rules
+- REALITY and advanced routing profiles
 
-## Logs & data locations
+## Data and Logs
 
 - Saved profiles: `$XDG_CONFIG_HOME/v2link-client/profiles.json` (fallback `~/.config/v2link-client/profiles.json`)
-- UI preferences + legacy compatibility: `~/.config/v2link-client/profile.json`
-- State + generated core config: `~/.local/state/v2link-client/`
+- Preferences/legacy compatibility: `~/.config/v2link-client/profile.json`
+- Runtime state and generated config: `~/.local/state/v2link-client/`
 - Logs: `~/.local/state/v2link-client/logs/`
-  - `app.log` (app logs)
-  - `xray_access.log`, `xray_error.log`, `xray_stdout.log`
 
 ## Troubleshooting
 
-### Connectivity shows OFFLINE / SSL EOF errors
+### Connectivity OFFLINE / TLS EOF errors
 
-This usually means the tunnel is not working end-to-end (server down/blocked, wrong TLS/SNI, etc.).
+Common causes:
 
-Common cause: the link sets an `sni=...` that does not match the server certificate **while** `allowInsecure=0`.
-In that case, TLS verification fails and the proxy tunnel may drop during handshake.
+- Invalid endpoint or blocked server
+- Mismatched `sni` and certificate with strict TLS verification (`allowInsecure=0`)
 
-What to try:
-- Remove `sni` or set it to the server host (or set `allowInsecure=1` if you understand the risk).
-- Check the logs via **Open logs folder**.
+Actions:
 
-### Qt fails with "Could not load the Qt platform plugin xcb"
+- verify link/server settings
+- try `sni` aligned with target host
+- inspect logs via **Open logs folder**
 
-If startup fails with messages mentioning `xcb` and `libxcb-cursor`, install the missing runtime dependency:
+### Qt xcb plugin error (`libxcb-cursor.so.0`)
+
+Install missing runtime library:
 
 ```bash
 sudo apt update
 sudo apt install -y libxcb-cursor0
 ```
-
-Then run the app again.
-
-## Development
-
-Developer deps:
-
-```bash
-source .venv/bin/activate
-pip install -r requirements-dev.txt
-```
-
-Run tests:
-
-```bash
-PYTHONPATH=src python -m pytest -q
-```
-
-## Author
-
-Udaya Sri
-
-## License
-
-MIT License
-
-Copyright (c) 2026 Udaya Sri

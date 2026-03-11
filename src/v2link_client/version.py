@@ -37,24 +37,25 @@ def _read_pyproject_version() -> str | None:
     return version or None
 
 
+def get_project_version() -> str:
+    """Return the version declared in local pyproject.toml when available."""
+    version = _read_pyproject_version()
+    if not version:
+        return DEFAULT_VERSION
+    return version
+
+
 @lru_cache(maxsize=1)
 def get_version() -> str:
     """
     Return the project version from a single source of truth.
 
     Priority:
-    1) Installed package metadata
-    2) Build/runtime override env var
-    3) Local pyproject (dev mode)
+    1) Build/runtime override env var
+    2) Local pyproject (dev mode/source tree)
+    3) Installed package metadata
     4) Default fallback
     """
-    try:
-        installed = metadata.version(PACKAGE_NAME).strip()
-        if installed:
-            return installed
-    except metadata.PackageNotFoundError:
-        pass
-
     env_version = (os.getenv("V2LINK_CLIENT_VERSION") or os.getenv("VERSION") or "").strip()
     if env_version:
         return env_version
@@ -62,6 +63,14 @@ def get_version() -> str:
     dev_version = _read_pyproject_version()
     if dev_version:
         return dev_version
+
+    try:
+        installed = metadata.version(PACKAGE_NAME).strip()
+        if installed:
+            return installed
+    except metadata.PackageNotFoundError:
+        pass
+
     return DEFAULT_VERSION
 
 

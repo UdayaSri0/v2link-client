@@ -15,6 +15,8 @@ from typing import Sequence
 import urllib.error
 import urllib.request
 
+from v2link_client.version import get_semver
+
 
 DEFAULT_HTTP_TEST_URLS: tuple[str, ...] = (
     # Plain HTTP first so we can surface clear proxy status codes (e.g. 503)
@@ -27,6 +29,7 @@ DEFAULT_HTTPS_TEST_URLS: tuple[str, ...] = (
     "https://www.gstatic.com/generate_204",
     "https://1.1.1.1/cdn-cgi/trace",
 )
+DEFAULT_USER_AGENT = f"v2link-client/{get_semver()}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +79,7 @@ def _try_urls(
     for url in urls:
         request = urllib.request.Request(
             url,
-            headers={"User-Agent": "v2link-client/0.1"},
+            headers={"User-Agent": DEFAULT_USER_AGENT},
             method="GET",
         )
         started = time.monotonic()

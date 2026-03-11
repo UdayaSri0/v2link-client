@@ -37,9 +37,23 @@ jobs:
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
 
+      - name: Verify tag matches project version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PROJECT_VERSION="$(python -c "from pathlib import Path; import tomllib; data = tomllib.loads(Path('pyproject.toml').read_text(encoding='utf-8')); print(str(data['project']['version']).strip())")"
+          if [[ -z "${PROJECT_VERSION}" ]]; then
+            echo "Error: project version is empty in pyproject.toml" >&2
+            exit 1
+          fi
+          if [[ "${TAG_VERSION}" != "${PROJECT_VERSION}" ]]; then
+            echo "Error: tag version (${TAG_VERSION}) does not match pyproject version (${PROJECT_VERSION})." >&2
+            exit 1
+          fi
+          echo "PROJECT_VERSION=${PROJECT_VERSION}" >> "${GITHUB_ENV}"
+
       - name: Build release artifacts
         run: |
-          VERSION="${GITHUB_REF_NAME}" ./scripts/build_release.sh
+          VERSION="${PROJECT_VERSION}" ./scripts/build_release.sh
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4

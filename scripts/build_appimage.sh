@@ -41,11 +41,6 @@ detect_version() {
     return
   fi
 
-  if git -C "${ROOT_DIR}" describe --tags --exact-match >/dev/null 2>&1; then
-    git -C "${ROOT_DIR}" describe --tags --exact-match | sed 's/^v//'
-    return
-  fi
-
   if [[ -x "${ROOT_DIR}/.venv/bin/python" ]]; then
     PYTHON_BIN="${ROOT_DIR}/.venv/bin/python"
   elif command -v python3 >/dev/null 2>&1; then
@@ -54,11 +49,12 @@ detect_version() {
     PYTHON_BIN="python"
   fi
 
-  "${PYTHON_BIN}" - <<'PY'
+  ROOT_DIR_ENV="${ROOT_DIR}" "${PYTHON_BIN}" - <<'PY'
+import os
 from pathlib import Path
 import tomllib
 
-data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+data = tomllib.loads((Path(os.environ["ROOT_DIR_ENV"]) / "pyproject.toml").read_text(encoding="utf-8"))
 print(data["project"]["version"])
 PY
 }
