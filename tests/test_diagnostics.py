@@ -12,7 +12,8 @@ def test_collect_diagnostics_includes_gsettings_proxy_state(tmp_path, monkeypatc
     monkeypatch.setattr(diag, "get_backend_warning_history", lambda limit=10: [])
     (tmp_path / SNAPSHOT_FILE).write_text("{}", encoding="utf-8")
 
-    def fake_run(cmd, check, capture_output, text, timeout):  # noqa: ANN001
+    def fake_run(cmd, check, capture_output, text, timeout, env):  # noqa: ANN001
+        assert "LD_LIBRARY_PATH" not in env
         if cmd == ["gsettings", "list-recursively", "org.gnome.system.proxy"]:
             return subprocess.CompletedProcess(
                 cmd,
@@ -29,9 +30,13 @@ def test_collect_diagnostics_includes_gsettings_proxy_state(tmp_path, monkeypatc
     monkeypatch.setattr(diag.subprocess, "run", fake_run)
 
     report = diag.collect_diagnostics()
+    assert "Runtime" in report
+    assert "- Host subprocess env: clean-host" in report
     assert "System Proxy (gsettings)" in report
     assert "Proxy Backend Warnings" in report
     assert "System proxy snapshot: present" in report
+    assert "- Command: gsettings list-recursively org.gnome.system.proxy" in report
+    assert "- Env mode: clean-host" in report
     assert "- org.gnome.system.proxy:mode = 'none'" in report
     assert "- org.gnome.system.proxy.http:port = 0" in report
 
@@ -52,7 +57,8 @@ def test_collect_diagnostics_surfaces_gsettings_stderr_warning(tmp_path, monkeyp
     monkeypatch.setattr(diag, "get_state_dir", lambda: tmp_path)
     monkeypatch.setattr(diag, "get_backend_warning_history", lambda limit=10: [])
 
-    def fake_run(cmd, check, capture_output, text, timeout):  # noqa: ANN001
+    def fake_run(cmd, check, capture_output, text, timeout, env):  # noqa: ANN001
+        assert "LD_LIBRARY_PATH" not in env
         if cmd == ["gsettings", "list-recursively", "org.gnome.system.proxy"]:
             return subprocess.CompletedProcess(
                 cmd,
@@ -106,8 +112,13 @@ def test_collect_diagnostics_includes_runtime_proxy_state(tmp_path, monkeypatch)
         },
         "xray": {
             "running": True,
+            "binary_path": "/usr/bin/xray",
             "health_state": "online",
             "health_detail": "55 ms",
+            "health_checked_url": "https://www.gstatic.com/generate_204",
+            "health_status_code": 204,
+            "health_latency_ms": 55,
+            "health_error": None,
             "http_listener_reachable": True,
             "socks_listener_reachable": True,
             "recent_traffic_flowing": False,
@@ -120,6 +131,8 @@ def test_collect_diagnostics_includes_runtime_proxy_state(tmp_path, monkeypatch)
     assert "- Desired vs actual match: no" in report
     assert "- Drift details: mode expected='manual' got='none'" in report
     assert "- Last proxy audit error: temporary failure" in report
+    assert "- Xray binary path: /usr/bin/xray" in report
+    assert "Proxied HTTP/HTTPS probe" in report
     assert "libdconfsettings.so undefined symbol" in report
 
 

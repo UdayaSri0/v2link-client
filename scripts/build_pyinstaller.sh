@@ -40,6 +40,8 @@ PYTHONPATH="${ROOT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}" \
   --windowed \
   --onedir \
   --name "${APP_NAME}" \
+  --icon "${ROOT_DIR}/packaging/icon.png" \
+  --add-data "${ROOT_DIR}/packaging/icon.png:." \
   --paths "${ROOT_DIR}/src" \
   --distpath "${DIST_DIR}" \
   --workpath "${WORK_DIR}" \

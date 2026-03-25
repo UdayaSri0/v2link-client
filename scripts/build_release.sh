@@ -38,6 +38,9 @@ fi
 export VERSION="${VERSION_NAME}"
 echo "Building release artifacts for v${VERSION_NAME}..."
 
+mkdir -p "${DIST_DIR}"
+rm -f "${DIST_DIR}"/*.AppImage "${DIST_DIR}"/*.deb "${DIST_DIR}/SHA256SUMS"
+
 "${ROOT_DIR}/scripts/build_pyinstaller.sh"
 "${ROOT_DIR}/scripts/build_appimage.sh"
 "${ROOT_DIR}/scripts/build_deb.sh"

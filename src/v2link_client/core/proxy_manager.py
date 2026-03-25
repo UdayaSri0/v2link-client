@@ -19,7 +19,6 @@ import logging
 import os
 from pathlib import Path
 import shlex
-import shutil
 import socket
 import subprocess
 import tempfile
@@ -29,6 +28,7 @@ import uuid
 
 from v2link_client.core.errors import ProxyApplyError
 from v2link_client.core.storage import get_state_dir, load_json
+from v2link_client.core.system_subprocess import build_host_subprocess_env, system_which
 
 try:  # pragma: no cover - optional dependency in some environments
     import gi
@@ -366,7 +366,14 @@ def get_backend_warning_history(*, limit: int = 10) -> list[str]:
 
 def _run(cmd: list[str], *, timeout_s: float = 3.0) -> subprocess.CompletedProcess[str]:
     command_text = _format_cmd(cmd)
-    logger.info("Running command: %s", command_text)
+    env, env_info = build_host_subprocess_env()
+    logger.info(
+        "Running command: %s [env_mode=%s runtime=%s removed_env=%s]",
+        command_text,
+        env_info.mode,
+        env_info.runtime_kind,
+        ",".join(env_info.removed_keys) or "none",
+    )
     try:
         result = subprocess.run(
             cmd,
@@ -374,6 +381,7 @@ def _run(cmd: list[str], *, timeout_s: float = 3.0) -> subprocess.CompletedProce
             capture_output=True,
             text=True,
             timeout=timeout_s,
+            env=env,
         )
     except subprocess.TimeoutExpired as exc:
         logger.exception("Command timed out: %s", command_text)
@@ -421,7 +429,7 @@ def _run(cmd: list[str], *, timeout_s: float = 3.0) -> subprocess.CompletedProce
 
 
 def _gsettings_available() -> bool:
-    if shutil.which("gsettings") is None:
+    if system_which("gsettings") is None:
         return False
     try:
         out = _run(["gsettings", "list-keys", _SCHEMA_PROXY], timeout_s=2.0).stdout
@@ -672,6 +680,13 @@ def _write_snapshot_atomic(path: Path, payload: dict[str, Any]) -> None:
         tmp_handle.close()
         tmp_handle = None
         os.replace(tmp_path, path)
+        logger.info(
+            "Saved system proxy snapshot: %s (version=%s backend=%s session=%s)",
+            path,
+            payload.get("version"),
+            payload.get("backend"),
+            payload.get("session_id"),
+        )
     except Exception as exc:
         logger.exception(
             "Failed to write system proxy snapshot atomically: target=%s temp=%s",

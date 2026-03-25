@@ -9,7 +9,7 @@ import tempfile
 import time
 
 from PyQt6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QAction, QDesktopServices
+from PyQt6.QtGui import QAction, QDesktopServices, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
 )
 
 from v2link_client import __author__, __version__
+from v2link_client.app_assets import get_app_icon_path
 from v2link_client.core.config_builder import (
     DEFAULT_API_PORT,
     DEFAULT_HTTP_PORT,
@@ -103,6 +104,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(f"v2link-client v{__version__}")
         self.resize(900, 640)
+        icon_path = get_app_icon_path()
+        if icon_path is not None:
+            self.setWindowIcon(QIcon(str(icon_path)))
 
         self._setup_menu()
 
@@ -270,6 +274,7 @@ class MainWindow(QMainWindow):
         self._health_in_flight = False
         self._health_token = 0
         self._last_health_ok: bool | None = None
+        self._last_health_result: ProxyHealthResult | None = None
         self._health_state = "offline"
         self._health_detail = "Not running"
 
@@ -512,6 +517,7 @@ class MainWindow(QMainWindow):
         self._last_uplink = None
         self._last_downlink = None
         self._last_traffic_activity_at = None
+        self._last_health_result = None
         self._set_metrics_defaults()
         self._update_diagnostics_runtime_state()
 
@@ -804,6 +810,7 @@ class MainWindow(QMainWindow):
         self._last_traffic_activity_at = None
         self._health_token += 1
         self._last_health_ok = None
+        self._last_health_result = None
         self._set_health_state("connecting", "Checking…")
         self._health_timer.start()
         self._kick_health_check()
@@ -890,6 +897,7 @@ class MainWindow(QMainWindow):
         self.ping_button.setEnabled(True if self._validated_link is not None else False)
         self.speed_test_button.setEnabled(False)
         self._set_health_state("offline", "Not running")
+        self._last_health_result = None
         proxy_note = self._restore_system_proxy()
         self._core_started_at = None
         self._last_traffic_activity_at = None
@@ -1232,8 +1240,21 @@ class MainWindow(QMainWindow):
             },
             "xray": {
                 "running": bool(self._process.is_running()),
+                "binary_path": self._process.binary_path,
                 "health_state": self._health_state,
                 "health_detail": self._health_detail,
+                "health_checked_url": (
+                    self._last_health_result.checked_url if self._last_health_result is not None else None
+                ),
+                "health_status_code": (
+                    self._last_health_result.status_code if self._last_health_result is not None else None
+                ),
+                "health_latency_ms": (
+                    self._last_health_result.latency_ms if self._last_health_result is not None else None
+                ),
+                "health_error": (
+                    self._last_health_result.error if self._last_health_result is not None else None
+                ),
                 "http_listener_reachable": http_ok,
                 "socks_listener_reachable": socks_ok,
                 "recent_traffic_flowing": self._recent_traffic_flowing(now=now),
@@ -1510,9 +1531,11 @@ class MainWindow(QMainWindow):
         if token != self._health_token:
             return
         if not isinstance(result, ProxyHealthResult):  # pragma: no cover - defensive
+            self._last_health_result = None
             self._set_health_state("offline", "Health check error")
             return
 
+        self._last_health_result = result
         if result.state == "online":
             latency = f"{result.latency_ms} ms" if result.latency_ms is not None else "ok"
             self._set_health_state("online", latency)
@@ -1533,6 +1556,7 @@ class MainWindow(QMainWindow):
         self._health_in_flight = False
         if token != self._health_token:
             return
+        self._last_health_result = None
         self._set_health_state("offline", message)
         self._update_diagnostics_runtime_state()
 
@@ -1645,5 +1669,6 @@ class MainWindow(QMainWindow):
         self._proxy_audit_failures = 0
         self._next_proxy_reconcile_at = 0.0
         self._proxy_audit_running = False
+        self._last_health_result = None
         self._update_diagnostics_runtime_state()
         return restore_note

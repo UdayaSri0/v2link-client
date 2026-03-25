@@ -2,22 +2,47 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import os
 import platform
-import shutil
+import shlex
 import subprocess
 import sys
 from typing import Any
 
 from v2link_client.core.proxy_manager import SNAPSHOT_FILE, get_backend_warning_history
 from v2link_client.core.storage import get_logs_dir, get_state_dir
+from v2link_client.core.system_subprocess import (
+    build_host_subprocess_env,
+    get_host_subprocess_env_info,
+    system_which,
+)
+
+@dataclass(frozen=True, slots=True)
+class CommandReport:
+    ok: bool
+    output: str
+    stderr: str
+    returncode: int | None
+    command: str
+    env_mode: str
+    removed_env_keys: tuple[str, ...]
 
 
 def _tool_available(name: str) -> bool:
-    return shutil.which(name) is not None
+    return system_which(name) is not None
 
 
-def _run_command(cmd: list[str], *, timeout_s: float = 3.0) -> tuple[bool, str, str]:
+def _format_cmd(cmd: list[str]) -> str:
+    try:
+        return shlex.join(cmd)
+    except Exception:
+        return str(cmd)
+
+
+def _run_command(cmd: list[str], *, timeout_s: float = 3.0) -> CommandReport:
+    env, env_info = build_host_subprocess_env()
+    command_text = _format_cmd(cmd)
     try:
         result = subprocess.run(
             cmd,
@@ -25,16 +50,41 @@ def _run_command(cmd: list[str], *, timeout_s: float = 3.0) -> tuple[bool, str, 
             capture_output=True,
             text=True,
             timeout=timeout_s,
+            env=env,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return False, str(exc), ""
+        return CommandReport(
+            ok=False,
+            output=str(exc),
+            stderr="",
+            returncode=None,
+            command=command_text,
+            env_mode=env_info.mode,
+            removed_env_keys=env_info.removed_keys,
+        )
 
     stdout = (result.stdout or "").strip()
     stderr = (result.stderr or "").strip()
     if result.returncode != 0:
         detail = stderr or stdout or "unknown error"
-        return False, detail, stderr
-    return True, stdout, stderr
+        return CommandReport(
+            ok=False,
+            output=detail,
+            stderr=stderr,
+            returncode=result.returncode,
+            command=command_text,
+            env_mode=env_info.mode,
+            removed_env_keys=env_info.removed_keys,
+        )
+    return CommandReport(
+        ok=True,
+        output=stdout,
+        stderr=stderr,
+        returncode=result.returncode,
+        command=command_text,
+        env_mode=env_info.mode,
+        removed_env_keys=env_info.removed_keys,
+    )
 
 
 def _format_proxy_status(status: Any) -> str:
@@ -98,6 +148,8 @@ def _append_runtime_state(lines: list[str], state: Any) -> None:
 
     if isinstance(xray, dict):
         lines.append(f"- Xray running: {'yes' if bool(xray.get('running')) else 'no'}")
+        if xray.get("binary_path"):
+            lines.append(f"- Xray binary path: {xray.get('binary_path')}")
         lines.append(
             f"- Xray proxy listeners reachable: "
             f"http={str(bool(xray.get('http_listener_reachable'))).lower()} "
@@ -111,6 +163,13 @@ def _append_runtime_state(lines: list[str], state: Any) -> None:
         health_detail = str(xray.get("health_detail", "") or "")
         if health_state:
             lines.append(f"- Health check: {health_state} ({health_detail or 'n/a'})")
+        health_url = xray.get("health_checked_url")
+        if health_url:
+            lines.append(
+                "- Proxied HTTP/HTTPS probe: "
+                f"url={health_url} status={xray.get('health_status_code')} "
+                f"latency_ms={xray.get('health_latency_ms')} error={xray.get('health_error') or 'none'}"
+            )
 
         proxy_matches = False
         if isinstance(system_proxy, dict):
@@ -137,6 +196,17 @@ def collect_diagnostics(state: Any | None = None) -> str:
     lines.append(f"- Kernel: {platform.version()}")
     lines.append(f"- Arch: {platform.machine()}")
     lines.append(f"- Python: {sys.version.split()[0]}")
+    lines.append("")
+
+    env_info = get_host_subprocess_env_info()
+    lines.append("Runtime")
+    lines.append(f"- Mode: {env_info.runtime_kind}")
+    lines.append(f"- Executable: {env_info.executable_path}")
+    lines.append(f"- Host subprocess env: {env_info.mode}")
+    lines.append(
+        "- Sanitized child env keys present now: "
+        f"{', '.join(env_info.removed_keys) if env_info.removed_keys else 'none'}"
+    )
     lines.append("")
 
     lines.append("Desktop Environment")
@@ -169,9 +239,16 @@ def collect_diagnostics(state: Any | None = None) -> str:
 
     lines.append("System Proxy (gsettings)")
     if _tool_available("gsettings"):
-        ok, output, stderr = _run_command(["gsettings", "list-recursively", "org.gnome.system.proxy"])
-        if ok:
-            for raw_line in output.splitlines():
+        report = _run_command(["gsettings", "list-recursively", "org.gnome.system.proxy"])
+        lines.append(f"- Command: {report.command}")
+        lines.append(f"- Env mode: {report.env_mode}")
+        lines.append(
+            "- Removed env keys: "
+            f"{', '.join(report.removed_env_keys) if report.removed_env_keys else 'none'}"
+        )
+        lines.append(f"- Exit code: {report.returncode if report.returncode is not None else 'n/a'}")
+        if report.ok:
+            for raw_line in report.output.splitlines():
                 line = raw_line.strip()
                 if not line:
                     continue
@@ -180,10 +257,10 @@ def collect_diagnostics(state: Any | None = None) -> str:
                     lines.append(f"- {schema}:{key} = {value}")
                 else:
                     lines.append(f"- {line}")
-            if stderr:
-                lines.append(f"- Warning: {stderr}")
+            if report.stderr:
+                lines.append(f"- Warning: {report.stderr}")
         else:
-            lines.append(f"- Error reading gsettings: {output}")
+            lines.append(f"- Error reading gsettings: {report.output}")
     else:
         lines.append("- gsettings unavailable")
     lines.append("")
