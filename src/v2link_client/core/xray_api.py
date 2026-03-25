@@ -9,14 +9,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import logging
 import re
 import subprocess
 from typing import Final
 
 from v2link_client.core.errors import AppError, BinaryMissingError
+from v2link_client.core.system_subprocess import build_host_subprocess_env
 
 
 _STAT_RE: Final[re.Pattern[str]] = re.compile(r'name:\\s*\"(?P<name>[^\"]+)\"\\s+value:\\s*(?P<value>\\d+)')
+logger = logging.getLogger(__name__)
 
 
 class XrayApiError(AppError):
@@ -51,6 +54,13 @@ def statsquery(
     if reset:
         cmd += ["-reset"]
 
+    env, env_info = build_host_subprocess_env()
+    logger.info(
+        "Running xray api command: %s [env_mode=%s removed_env=%s]",
+        cmd,
+        env_info.mode,
+        ",".join(env_info.removed_keys) or "none",
+    )
     try:
         result = subprocess.run(
             cmd,
@@ -58,6 +68,7 @@ def statsquery(
             capture_output=True,
             text=True,
             timeout=timeout_s + 1.0,
+            env=env,
         )
     except FileNotFoundError as exc:
         raise BinaryMissingError(

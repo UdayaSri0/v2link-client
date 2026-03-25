@@ -7,6 +7,18 @@ All notable changes to this project are documented in this file.
 ### Notes
 - No unreleased entries yet.
 
+## [0.1.9.0.5] - 2026-03-25
+
+### Changed
+- Packaged builds now launch host-system tools such as `gsettings` and `xray` with a sanitized native environment, so Debian-installed sessions no longer inherit PyInstaller runtime library/plugin paths into child processes.
+- Diagnostics now report runtime packaging mode, executable path, clean-host subprocess mode, exact `gsettings` command details, and the proxied HTTP/HTTPS probe result used for health reporting.
+- Runtime builds now bundle and apply the shipped application icon so source runs, AppImage, and Debian packages share the same launcher/window icon.
+
+### Fixed
+- Debian-installed runs now preserve system-proxy snapshot creation/restore and GNOME proxy application under packaged execution, matching source-run behavior more closely.
+- Xray validation, startup, and traffic-stat commands now use the same clean host subprocess environment as GNOME/system integration calls.
+- Replaced the placeholder package icon with the provided application artwork.
+
 ## [0.1.9.0.4] - 2026-03-11
 
 ### Added
