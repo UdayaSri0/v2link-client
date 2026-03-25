@@ -1,16 +1,16 @@
 Package: v2link-client
-Version: 0.1.9.0.4
+Version: 0.1.9.0.5
 Architecture: amd64
 Maintainer: Udaya Sri <udayasri0@users.noreply.github.com>
 Homepage: https://github.com/UdayaSri0/v2link-client
 Depends: libegl1, libgl1, libxkbcommon-x11-0, libdbus-1-3, libxcb-cursor0
 Priority: optional
 Section: net
-Filename: pool/main/v/v2link-client/v2link-client_0.1.9.0.4_amd64.deb
-Size: 56854818
-SHA256: daf549a6108ba630a1e10347716aa02c10d86684a6235d5b69193ad8737e9c6c
-SHA1: 4c5338f09ab2366f6aefc7d6dc63fc54f3f19b13
-MD5sum: e726d6f53c6c3cd2dd09d1e2aaae96f0
+Filename: pool/main/v/v2link-client/v2link-client_0.1.9.0.5_amd64.deb
+Size: 59764186
+SHA256: c2a5d0697d99fe2e5cde2e90f14799db848b38ab678fe19fa3b440c3a274e317
+SHA1: 845940039fd52fc780e2b4ccb378980ddfdac0d4
+MD5sum: 6548d0ab11ee63dcb14e02a3fb14a070
 Description: Linux desktop client for V2Ray-style links
  Linux desktop client for V2Ray-style links built with Python and PyQt6.
  Runs Xray-core under the hood and provides profile management,
