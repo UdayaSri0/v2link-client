@@ -30,6 +30,7 @@ class NetmonStatus:
     provider: str = "disabled"
     backend: str = "unavailable"
     kernel_supported: bool | None = None
+    last_error: str | None = None
 
 
 class NetmonClient:
@@ -60,6 +61,7 @@ class NetmonClient:
                 provider="mock",
                 backend="mock",
                 kernel_supported=True,
+                last_error=None,
             )
         if self.provider == "socket":
             try:
@@ -279,6 +281,7 @@ def _unavailable_status(
         provider="socket",
         backend="unavailable",
         kernel_supported=None,
+        last_error=last_response,
     )
 
 
@@ -305,6 +308,11 @@ def _status_from_payload(
         provider="socket",
         backend=str(payload.get("backend") or "unknown"),
         kernel_supported=bool(payload.get("kernel_supported", False)),
+        last_error=(
+            str(payload.get("last_error"))
+            if payload.get("last_error") not in {None, ""}
+            else None
+        ),
     )
 
 

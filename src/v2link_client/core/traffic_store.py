@@ -123,6 +123,15 @@ def _parse_iso(value: str) -> datetime:
     return datetime.fromisoformat(value)
 
 
+def _next_month_start(month_prefix: str) -> str:
+    year_text, month_text = month_prefix.split("-", maxsplit=1)
+    year = int(year_text)
+    month = int(month_text)
+    if month == 12:
+        return f"{year + 1:04d}-01-01"
+    return f"{year:04d}-{month + 1:02d}-01"
+
+
 def _stats_pair(stats: TrafficStats | dict[str, Any] | None) -> tuple[int, int]:
     if stats is None:
         return 0, 0
@@ -355,6 +364,23 @@ class TrafficStore:
                 WHERE date = ?
                 """,
                 (today,),
+            ).fetchone()
+        return TrafficUsageSummary(
+            uplink_bytes=int(row["uplink_bytes"] if row else 0),
+            downlink_bytes=int(row["downlink_bytes"] if row else 0),
+        )
+
+    def get_month_summary(self) -> TrafficUsageSummary:
+        month_prefix = _now().date().isoformat()[:7]
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COALESCE(SUM(uplink_bytes), 0) AS uplink_bytes,
+                       COALESCE(SUM(downlink_bytes), 0) AS downlink_bytes
+                FROM daily_proxy_usage
+                WHERE date >= ? AND date < ?
+                """,
+                (f"{month_prefix}-01", _next_month_start(month_prefix)),
             ).fetchone()
         return TrafficUsageSummary(
             uplink_bytes=int(row["uplink_bytes"] if row else 0),

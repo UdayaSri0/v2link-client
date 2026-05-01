@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import sqlite3
 
+import v2link_client.core.traffic_store as traffic_store
 from v2link_client.core.traffic_store import AppIdentity, TrafficStore
 from v2link_client.core.xray_api import TrafficStats
 
@@ -105,6 +106,36 @@ def test_daily_aggregation(tmp_path) -> None:
     assert row.profile_id is None
     assert row.uplink_bytes == 150
     assert row.downlink_bytes == 260
+
+
+def test_month_summary_uses_local_month(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        traffic_store,
+        "_now",
+        lambda: datetime(2026, 5, 15, 12, 0, 0, tzinfo=timezone.utc).astimezone(),
+    )
+    store = TrafficStore(tmp_path / "traffic.sqlite3")
+    may_session = store.start_proxy_session(
+        None, "Unsaved profile", "may", _stats(0, 0), "127.0.0.1:10085", 1080, 8080
+    )
+    store.record_proxy_sample(
+        may_session,
+        _stats(100, 200),
+        now=datetime(2026, 5, 1, 10, 0, 0, tzinfo=timezone.utc),
+    )
+    april_session = store.start_proxy_session(
+        None, "Unsaved profile", "april", _stats(0, 0), "127.0.0.1:10085", 1080, 8080
+    )
+    store.record_proxy_sample(
+        april_session,
+        _stats(300, 400),
+        now=datetime(2026, 4, 30, 10, 0, 0, tzinfo=timezone.utc),
+    )
+
+    summary = store.get_month_summary()
+
+    assert summary.uplink_bytes == 100
+    assert summary.downlink_bytes == 200
 
 
 def test_profile_total_aggregation(tmp_path) -> None:

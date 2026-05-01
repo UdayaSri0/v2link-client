@@ -11,6 +11,14 @@ All notable changes to this project are documented in this file.
 - Added per-application tracking readiness: app traffic tables, data classes, disabled/mock `v2link-netmon` client abstraction, Applications tab, settings, and diagnostics.
 - Added the optional `v2link-netmon` Rust helper scaffold with Unix socket JSON API, process identity resolver, SQLite app-usage schema, systemd service packaging, and graceful eBPF-unavailable diagnostics.
 
+### Traffic Monitor
+- Added persistent proxy/profile traffic history.
+- Added daily and monthly usage summaries.
+- Added a Traffic Monitor dashboard with Overview, Applications, Proxy Profiles, History, Settings, and Diagnostics tabs.
+- Added optional per-application tracking preparation and `v2link-netmon` helper integration.
+- Added privacy-focused local-only storage and clear helper/root separation.
+- Added diagnostics for Xray stats, the traffic database, app-tracking helper state, and kernel/eBPF support.
+
 ### Notes
 - Traffic history is local only at `$XDG_DATA_HOME/v2link-client/traffic.sqlite3` (or the platform default data directory).
 - Per-application tracking remains advanced/optional; the GUI does not run as root, and the helper reports unavailable when eBPF support or permissions are insufficient.

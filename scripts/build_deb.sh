@@ -99,16 +99,21 @@ APPS_DIR="${PKG_DIR}/usr/share/applications"
 ICON_DIR="${PKG_DIR}/usr/share/icons/hicolor/256x256/apps"
 LIB_DIR="${PKG_DIR}/usr/lib/${APP_NAME}"
 SYSTEMD_DIR="${PKG_DIR}/lib/systemd/system"
+DOC_DIR="${PKG_DIR}/usr/share/doc/${APP_NAME}"
 OUTPUT_DEB="${DIST_DIR}/${APP_NAME}_${VERSION_NAME}_${ARCH_NAME}.deb"
 
 rm -rf "${PKG_DIR}"
-mkdir -p "${DEBIAN_DIR}" "${OPT_DIR}" "${BIN_DIR}" "${APPS_DIR}" "${ICON_DIR}" "${LIB_DIR}" "${SYSTEMD_DIR}"
+mkdir -p "${DEBIAN_DIR}" "${OPT_DIR}" "${BIN_DIR}" "${APPS_DIR}" "${ICON_DIR}" "${LIB_DIR}" "${SYSTEMD_DIR}" "${DOC_DIR}"
 
 cp -a "${PYINSTALLER_DIR}/." "${OPT_DIR}/"
 cp "${ROOT_DIR}/dist/netmon/v2link-netmon" "${LIB_DIR}/v2link-netmon"
 cp "${DESKTOP_SRC}" "${APPS_DIR}/${APP_NAME}.desktop"
 cp "${ICON_SRC}" "${ICON_DIR}/${APP_NAME}.png"
 cp "${NETMON_SERVICE_SRC}" "${SYSTEMD_DIR}/v2link-netmon.service"
+cp "${ROOT_DIR}/README.md" "${DOC_DIR}/README.md"
+cp "${ROOT_DIR}/CHANGELOG.md" "${DOC_DIR}/changelog"
+cp "${ROOT_DIR}/docs/traffic-monitor.md" "${DOC_DIR}/traffic-monitor.md"
+cp "${ROOT_DIR}/netmon/README.md" "${DOC_DIR}/v2link-netmon.md"
 
 sed \
   -e "s|@VERSION@|${VERSION_NAME}|g" \
@@ -127,6 +132,8 @@ cp "${DEB_TEMPLATE_DIR}/postrm" "${DEBIAN_DIR}/postrm"
 chmod 0755 "${BIN_DIR}/${APP_NAME}" "${DEBIAN_DIR}/postinst" "${DEBIAN_DIR}/postrm"
 chmod 0755 "${OPT_DIR}/${APP_NAME}" || true
 chmod 0755 "${LIB_DIR}/v2link-netmon"
+chmod 0644 "${SYSTEMD_DIR}/v2link-netmon.service"
+chmod 0644 "${DOC_DIR}/README.md" "${DOC_DIR}/changelog" "${DOC_DIR}/traffic-monitor.md" "${DOC_DIR}/v2link-netmon.md"
 
 rm -f "${OUTPUT_DEB}"
 dpkg-deb --build --root-owner-group "${PKG_DIR}" "${OUTPUT_DEB}" >/dev/null

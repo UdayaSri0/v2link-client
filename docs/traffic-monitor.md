@@ -4,6 +4,27 @@ The Traffic Monitor records historical proxy usage from Xray's Stats API. It als
 
 Per-application tracking is marked **Advanced / Optional / Requires helper service**. The optional helper is `v2link-netmon`.
 
+## Architecture
+
+```text
+Normal desktop user
+  v2link-client (Python/PyQt6 GUI, never root)
+    |-- reads Xray Stats API through local xray CLI calls
+    |-- writes local SQLite traffic history
+    |-- optionally reads app stats from Unix socket
+    |
+    +--> Xray-core
+          |-- local SOCKS/HTTP proxy listeners
+          |-- local Stats API when proxy is running
+
+Optional privileged system service
+  v2link-netmon
+    |-- Unix socket: /run/v2link-client/netmon.sock
+    |-- process identity from /proc
+    |-- eBPF backend interface with graceful unsupported state
+    |-- local SQLite app usage storage
+```
+
 ## What It Tracks
 
 - Total proxy upload and download over time
@@ -38,6 +59,8 @@ $XDG_CONFIG_HOME/v2link-client/traffic_settings.json
 ## Proxy Tracking vs App Tracking
 
 Proxy/profile tracking uses Xray's Stats API. It measures traffic that flows through the active proxy/profile and can run entirely inside the normal unprivileged GUI.
+
+The app queries Xray counters without `-reset`, computes safe deltas locally, and treats counter decreases as resets with a zero delta. Xray restarts create separate sessions.
 
 True per-application tracking on Linux requires process/executable attribution. That work belongs in a separate optional helper service:
 
@@ -77,7 +100,7 @@ Per-application tracking requires the optional v2link-netmon helper service. Pro
 
 Traffic history stays on the local machine. v2link-client does not upload traffic history or profile usage history to any external service.
 
-Application traffic tracking records local process names, executable paths, and byte counters. It does not decrypt content, inspect messages, or upload data anywhere. All history is stored locally on this device.
+Application traffic tracking records local process names, executable paths, UIDs, and byte counters only. It does not decrypt traffic, inspect packet payloads, read DNS contents, inspect messages, collect tokens/cookies, or upload data anywhere. All history is stored locally on this device.
 
 ## Limitation
 
@@ -90,3 +113,10 @@ Xray Core / Proxy Tunnel
 ```
 
 It is not hidden, because Xray really performs the encrypted remote connection when the proxy is active.
+
+## Troubleshooting
+
+- **No proxy/profile traffic:** start Xray from the GUI and check Diagnostics for the Xray stats API server and last query result.
+- **Applications tab unavailable:** the optional helper is not installed, not enabled, or not reachable at `/run/v2link-client/netmon.sock`.
+- **Permission/capability warning:** the helper may not have enough privilege or kernel support for eBPF accounting. The GUI remains safe and unprivileged.
+- **AppImage:** AppImage builds do not bundle or enable the privileged helper; install the Debian package or a future helper package to use per-app tracking.

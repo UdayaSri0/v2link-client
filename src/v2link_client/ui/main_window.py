@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 import socket
 import tempfile
@@ -250,6 +251,7 @@ class MainWindow(QMainWindow):
             self.traffic_monitor_widget.set_diagnostics(
                 api_server=None,
                 stats_available=False,
+                last_stats_query_time=None,
                 last_sample_time=None,
                 warning=None,
                 store_error=self._last_traffic_store_error,
@@ -328,6 +330,7 @@ class MainWindow(QMainWindow):
         self._last_uplink: int | None = None
         self._last_downlink: int | None = None
         self._last_stats_query_result: str | None = None
+        self._last_stats_query_time: str | None = None
         self._stats_available = False
         self._traffic_session_id: str | None = None
         self._last_traffic_sample: ProxyTrafficSample | None = None
@@ -556,6 +559,7 @@ class MainWindow(QMainWindow):
         self._last_uplink = None
         self._last_downlink = None
         self._last_stats_query_result = None
+        self._last_stats_query_time = None
         self._stats_available = False
         self._last_traffic_activity_at = None
         self._last_health_result = None
@@ -849,6 +853,7 @@ class MainWindow(QMainWindow):
         self._last_uplink = None
         self._last_downlink = None
         self._last_stats_query_result = None
+        self._last_stats_query_time = None
         self._stats_available = False
         self._last_traffic_activity_at = None
         self._start_traffic_session()
@@ -1319,6 +1324,7 @@ class MainWindow(QMainWindow):
         self.traffic_monitor_widget.set_diagnostics(
             api_server=self._traffic_api_server(),
             stats_available=self._stats_available,
+            last_stats_query_time=self._last_stats_query_time,
             last_sample_time=(
                 self._last_traffic_sample.timestamp if self._last_traffic_sample is not None else None
             ),
@@ -1414,6 +1420,7 @@ class MainWindow(QMainWindow):
                 "stats_api_configured": self._api_port is not None,
                 "stats_api_server": self._traffic_api_server(),
                 "last_stats_query_result": self._last_stats_query_result,
+                "last_stats_query_time": self._last_stats_query_time,
                 "health_state": self._health_state,
                 "health_detail": self._health_detail,
                 "health_checked_url": (
@@ -1563,6 +1570,7 @@ class MainWindow(QMainWindow):
         self._last_stats_query_result = (
             f"ok: uplink={stats.uplink_bytes} downlink={stats.downlink_bytes}"
         )
+        self._last_stats_query_time = self._now_iso_seconds()
         traffic_sample = self._record_traffic_sample(stats)
 
         self.traffic_label.setText(
@@ -1601,8 +1609,12 @@ class MainWindow(QMainWindow):
         logger.info("Stats poll failed: %s", message)
         self._stats_available = False
         self._last_stats_query_result = message
+        self._last_stats_query_time = self._now_iso_seconds()
         self._refresh_traffic_monitor()
         self._update_diagnostics_runtime_state()
+
+    def _now_iso_seconds(self) -> str:
+        return datetime.now().astimezone().isoformat(timespec="seconds")
 
     def _on_ping_clicked(self) -> None:
         if self._ping_in_flight:

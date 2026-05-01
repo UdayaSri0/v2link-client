@@ -159,6 +159,8 @@ def _append_runtime_state(lines: list[str], state: Any) -> None:
         )
         if xray.get("stats_api_server"):
             lines.append(f"- Xray stats API server: {xray.get('stats_api_server')}")
+        if xray.get("last_stats_query_time"):
+            lines.append(f"- Last stats query time: {xray.get('last_stats_query_time')}")
         if xray.get("last_stats_query_result"):
             lines.append(f"- Last stats query result: {xray.get('last_stats_query_result')}")
         lines.append(
@@ -228,6 +230,7 @@ def _append_runtime_state(lines: list[str], state: Any) -> None:
                 f"{'ok' if bool(netmon.get('permission_ok')) else 'not available'}"
             )
             lines.append(f"- App helper last response: {netmon.get('last_response') or 'none'}")
+            lines.append(f"- App helper last error: {netmon.get('last_error') or 'none'}")
             lines.append(f"- Kernel support: {netmon.get('kernel_support') or 'unknown/not checked yet'}")
 
     lines.append("")

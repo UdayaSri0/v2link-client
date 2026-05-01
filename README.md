@@ -211,15 +211,20 @@ GitHub secrets:
 
 ## Traffic Monitor
 
-The Traffic Monitor records proxy traffic from Xray's Stats API while the core is running. It shows:
+The Traffic Monitor records local traffic history and shows:
 
 - Today upload/download totals
 - Current session upload/download and live speed
+- This month upload/download totals
 - Per saved-profile upload/download totals
 - Daily history with 7-day and 30-day views
 - Advanced **Applications** tab for future per-application tracking
 - Settings for retention, CSV export, and clearing local traffic history
 - Diagnostics for the stats API, helper readiness, and local traffic database
+
+## Proxy/Profile Tracking
+
+Proxy/profile tracking records traffic from Xray's Stats API while the core is running. It works in the normal GUI with no root permission because Xray provides proxy counters through its local API. The app does not use `xray api -reset`, so live labels and history do not fight over counters.
 
 Traffic history is stored locally only in SQLite:
 
@@ -235,9 +240,9 @@ Settings are stored at:
 $XDG_CONFIG_HOME/v2link-client/traffic_settings.json
 ```
 
-Proxy/profile tracking works in the normal GUI with no root permission because Xray provides proxy counters through its Stats API.
+## Per-Application Tracking
 
-Per-application tracking is different. True Linux app attribution needs an optional privileged helper service, planned as `v2link-netmon`, because process/executable attribution must happen outside the unprivileged GUI. The GUI never runs as root. Until that helper exists and is enabled, the Applications tab clearly reports that app tracking is advanced/optional/unavailable, while proxy/profile tracking remains active.
+Per-application tracking is advanced and optional. True Linux app attribution needs the optional privileged helper service `v2link-netmon`, because process/executable attribution must happen outside the unprivileged GUI. The GUI never runs as root.
 
 Debian packages install the optional helper and systemd service, but do not enable it automatically:
 
@@ -248,7 +253,20 @@ sudo systemctl disable --now v2link-netmon
 
 The helper exposes read-only JSON stats over `/run/v2link-client/netmon.sock`. If the helper, permissions, or eBPF backend are unavailable, the GUI stays unprivileged and shows a clear unavailable/diagnostic state.
 
-Privacy note: traffic history never leaves your machine. Application traffic tracking records local process names, executable paths, and byte counters. It does not decrypt content, inspect messages, or upload data anywhere. Phase 1 does not provide perfect per-application attribution, so traffic from browsers, VS Code, Transmission, and other apps may appear together under the active proxy profile.
+## Privacy
+
+Traffic history never leaves your machine. Proxy/profile stats come from Xray counters. Application traffic tracking records local process names, executable paths, UIDs, and byte counters only. It does not decrypt traffic, inspect packet payloads, read messages, collect tokens/cookies, or upload telemetry anywhere.
+
+## Limitations
+
+Per-application attribution is not perfect when a local proxy is involved. When system proxy is enabled, apps may connect to `127.0.0.1` while Xray performs the encrypted remote connection, so some traffic can appear under `Xray Core / Proxy Tunnel`. Xray is shown separately and is not hidden.
+
+## Troubleshooting Traffic Monitor
+
+- If proxy/profile totals stay at zero, confirm Xray is running and the diagnostics tab shows a configured stats API server.
+- If the Applications tab says the helper is unavailable, enable the optional service with `sudo systemctl enable --now v2link-netmon`.
+- If the helper is running but eBPF is unavailable, check Traffic Monitor diagnostics for kernel/capability details.
+- AppImage builds work without the helper and will show the helper-unavailable state.
 
 ## Supported Link Scope
 

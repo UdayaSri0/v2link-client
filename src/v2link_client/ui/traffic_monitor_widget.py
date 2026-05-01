@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Iterable
 
 from PyQt6.QtCore import Qt, pyqtSignal
@@ -173,10 +174,16 @@ class TrafficMonitorWidget(QWidget):
 
         self.today_download_label = QLabel("0 B")
         self.today_upload_label = QLabel("0 B")
+        self.today_total_label = QLabel("0 B")
+        self.month_download_label = QLabel("0 B")
+        self.month_upload_label = QLabel("0 B")
+        self.month_total_label = QLabel("0 B")
         self.session_download_label = QLabel("0 B")
         self.session_upload_label = QLabel("0 B")
+        self.session_total_label = QLabel("0 B")
         self.live_download_label = QLabel("0.0 Mbps")
         self.live_upload_label = QLabel("0.0 Mbps")
+        self.live_total_label = QLabel("0.0 Mbps")
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_overview_tab(), "Overview")
@@ -223,6 +230,7 @@ class TrafficMonitorWidget(QWidget):
             self._last_live_sample = None
             self.live_upload_label.setText("0.0 Mbps")
             self.live_download_label.setText("0.0 Mbps")
+            self.live_total_label.setText("0.0 Mbps")
             return
 
         self._last_live_sample = sample
@@ -230,8 +238,10 @@ class TrafficMonitorWidget(QWidget):
         session_down = sample.session_downlink_bytes if sample.session_downlink_bytes else sample.downlink_bytes
         self.session_upload_label.setText(format_bytes(session_up))
         self.session_download_label.setText(format_bytes(session_down))
+        self.session_total_label.setText(format_bytes(session_up + session_down))
         self.live_upload_label.setText(format_mbps(sample.upload_bps))
         self.live_download_label.setText(format_mbps(sample.download_bps))
+        self.live_total_label.setText(format_mbps(sample.upload_bps + sample.download_bps))
         self.last_sample_label.setText(sample.timestamp)
         if sample.warning:
             self.set_warning(sample.warning)
@@ -241,12 +251,14 @@ class TrafficMonitorWidget(QWidget):
         *,
         api_server: str | None,
         stats_available: bool,
+        last_stats_query_time: str | None,
         last_sample_time: str | None,
         warning: str | None,
         store_error: str | None,
     ) -> None:
         self.api_server_label.setText(api_server or "not configured")
         self.stats_available_label.setText("yes" if stats_available else "no")
+        self.last_stats_query_label.setText(last_stats_query_time or "none")
         self.last_sample_label.setText(last_sample_time or "none")
         self.warning_label.setText(warning or "none")
         self.store_error_label.setText(store_error or "none")
@@ -265,9 +277,12 @@ class TrafficMonitorWidget(QWidget):
             return
         try:
             self.db_path_label.setText(str(self._store.db_path))
+            self.db_writable_label.setText("yes" if self._db_writable() else "no")
             self.app_tables_label.setText("yes" if self._store.app_tables_present() else "no")
             today = self._store.get_today_summary()
+            month = self._store.get_month_summary()
             self._set_today_summary(today)
+            self._set_month_summary(month)
             self._populate_applications()
             self._populate_profiles()
             self._populate_history()
@@ -278,17 +293,70 @@ class TrafficMonitorWidget(QWidget):
 
     def _build_overview_tab(self) -> QWidget:
         tab = QWidget()
+        refresh_button = QPushButton("Refresh")
+        refresh_button.clicked.connect(self.refresh)
+        export_button = QPushButton("Export CSV")
+        export_button.clicked.connect(self._on_export_clicked)
+
+        actions = QHBoxLayout()
+        actions.addWidget(refresh_button)
+        actions.addWidget(export_button)
+        actions.addStretch(1)
+
         grid = QGridLayout()
         grid.setSpacing(10)
-        self._add_metric(grid, 0, 0, "Today download", self.today_download_label)
-        self._add_metric(grid, 0, 1, "Today upload", self.today_upload_label)
-        self._add_metric(grid, 1, 0, "Current session download", self.session_download_label)
-        self._add_metric(grid, 1, 1, "Current session upload", self.session_upload_label)
-        self._add_metric(grid, 2, 0, "Current live download", self.live_download_label)
-        self._add_metric(grid, 2, 1, "Current live upload", self.live_upload_label)
+        self._add_metric_group(
+            grid,
+            0,
+            0,
+            "Today",
+            [
+                ("Download", self.today_download_label),
+                ("Upload", self.today_upload_label),
+                ("Total", self.today_total_label),
+            ],
+        )
+        self._add_metric_group(
+            grid,
+            0,
+            1,
+            "Current Session",
+            [
+                ("Download", self.session_download_label),
+                ("Upload", self.session_upload_label),
+                ("Total", self.session_total_label),
+            ],
+        )
+        self._add_metric_group(
+            grid,
+            1,
+            0,
+            "This Month",
+            [
+                ("Download", self.month_download_label),
+                ("Upload", self.month_upload_label),
+                ("Total", self.month_total_label),
+            ],
+        )
+        self._add_metric_group(
+            grid,
+            1,
+            1,
+            "Live Speed",
+            [
+                ("Download", self.live_download_label),
+                ("Upload", self.live_upload_label),
+                ("Total", self.live_total_label),
+            ],
+        )
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
-        tab.setLayout(grid)
+        layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addLayout(actions)
+        layout.addLayout(grid)
+        layout.addStretch(1)
+        tab.setLayout(layout)
         return tab
 
     def _build_profiles_tab(self) -> QWidget:
@@ -299,8 +367,12 @@ class TrafficMonitorWidget(QWidget):
         self.profiles_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         self.profiles_table.setSortingEnabled(True)
         self.profiles_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.profiles_empty_label = QLabel("No traffic recorded yet. Start a proxy session to begin tracking.")
+        self.profiles_empty_label.setProperty("role", "muted")
+        self.profiles_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.profiles_empty_label)
         layout.addWidget(self.profiles_table)
         tab.setLayout(layout)
         return tab
@@ -341,6 +413,9 @@ class TrafficMonitorWidget(QWidget):
         self.apps_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.apps_table.setSortingEnabled(True)
         self.apps_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.apps_empty_label = QLabel("Per-application helper is not installed.")
+        self.apps_empty_label.setProperty("role", "muted")
+        self.apps_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         top_row = QHBoxLayout()
         top_row.addWidget(QLabel("Search"))
@@ -353,6 +428,7 @@ class TrafficMonitorWidget(QWidget):
         layout.addWidget(self.app_proxy_warning_label)
         layout.addWidget(self.app_privacy_label)
         layout.addLayout(top_row)
+        layout.addWidget(self.apps_empty_label)
         layout.addWidget(self.apps_table, 1)
         tab.setLayout(layout)
         return tab
@@ -368,6 +444,9 @@ class TrafficMonitorWidget(QWidget):
         self.history_table.setHorizontalHeaderLabels(["Date", "Download", "Upload", "Total"])
         self.history_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.history_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.history_empty_label = QLabel("No traffic recorded yet. Start a proxy session to begin tracking.")
+        self.history_empty_label.setProperty("role", "muted")
+        self.history_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         top_row = QHBoxLayout()
         top_row.addWidget(QLabel("Range"))
         top_row.addWidget(self.range_selector)
@@ -376,6 +455,7 @@ class TrafficMonitorWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(top_row)
         layout.addWidget(self.chart)
+        layout.addWidget(self.history_empty_label)
         layout.addWidget(self.history_table, 1)
         tab.setLayout(layout)
         return tab
@@ -384,13 +464,17 @@ class TrafficMonitorWidget(QWidget):
         tab = QWidget()
         self.db_path_label = QLabel("unknown")
         self.db_path_label.setWordWrap(True)
+        self.db_writable_label = QLabel("unknown")
         self.api_server_label = QLabel("not configured")
         self.stats_available_label = QLabel("no")
+        self.last_stats_query_label = QLabel("none")
         self.app_tracking_enabled_label = QLabel("no")
         self.helper_status_label = QLabel("unavailable")
         self.helper_backend_label = QLabel("unavailable")
         self.helper_endpoint_label = QLabel("not configured")
         self.helper_response_label = QLabel("none")
+        self.helper_error_label = QLabel("none")
+        self.helper_error_label.setWordWrap(True)
         self.helper_permission_label = QLabel("no")
         self.kernel_support_label = QLabel("not checked yet")
         self.app_tables_label = QLabel("unknown")
@@ -408,13 +492,16 @@ class TrafficMonitorWidget(QWidget):
         grid.setSpacing(8)
         labels = [
             ("Traffic DB path", self.db_path_label),
+            ("Traffic DB writable", self.db_writable_label),
             ("Xray API server", self.api_server_label),
             ("Stats available", self.stats_available_label),
+            ("Last stats query time", self.last_stats_query_label),
             ("App tracking setting", self.app_tracking_enabled_label),
             ("Helper installed/running", self.helper_status_label),
             ("Helper backend", self.helper_backend_label),
             ("Helper socket/API", self.helper_endpoint_label),
             ("Last helper response", self.helper_response_label),
+            ("Last helper error", self.helper_error_label),
             ("Permission state", self.helper_permission_label),
             ("Kernel support", self.kernel_support_label),
             ("DB app tables present", self.app_tables_label),
@@ -500,14 +587,46 @@ class TrafficMonitorWidget(QWidget):
         wrapper.setLayout(cell)
         grid.addWidget(wrapper, row, col)
 
+    def _add_metric_group(
+        self,
+        grid: QGridLayout,
+        row: int,
+        col: int,
+        title: str,
+        metrics: list[tuple[str, QLabel]],
+    ) -> None:
+        title_label = QLabel(title)
+        title_label.setProperty("role", "hint")
+        group = QGridLayout()
+        group.setSpacing(6)
+        group.addWidget(title_label, 0, 0, 1, 2)
+        for idx, (label_text, value_label) in enumerate(metrics, start=1):
+            label = QLabel(label_text)
+            label.setProperty("role", "muted")
+            value_label.setProperty("role", "pill")
+            value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            group.addWidget(label, idx, 0)
+            group.addWidget(value_label, idx, 1)
+        wrapper = QWidget()
+        wrapper.setLayout(group)
+        grid.addWidget(wrapper, row, col)
+
     def _set_today_summary(self, summary: TrafficUsageSummary) -> None:
         self.today_upload_label.setText(format_bytes(summary.uplink_bytes))
         self.today_download_label.setText(format_bytes(summary.downlink_bytes))
+        self.today_total_label.setText(format_bytes(summary.uplink_bytes + summary.downlink_bytes))
+
+    def _set_month_summary(self, summary: TrafficUsageSummary) -> None:
+        self.month_upload_label.setText(format_bytes(summary.uplink_bytes))
+        self.month_download_label.setText(format_bytes(summary.downlink_bytes))
+        self.month_total_label.setText(format_bytes(summary.uplink_bytes + summary.downlink_bytes))
 
     def _populate_profiles(self) -> None:
         if self._store is None:
             return
         rows = self._store.get_profile_summaries(limit=100)
+        self.profiles_empty_label.setVisible(not rows)
+        self.profiles_table.setVisible(bool(rows))
         self.profiles_table.setSortingEnabled(False)
         self.profiles_table.setRowCount(len(rows))
         for row_idx, row in enumerate(rows):
@@ -564,6 +683,17 @@ class TrafficMonitorWidget(QWidget):
             ]
 
         self.apps_table.setSortingEnabled(False)
+        self.apps_empty_label.setVisible(not rows)
+        self.apps_table.setVisible(bool(rows))
+        if not rows:
+            if self._settings.app_tracking_enabled and not self._netmon_status.installed:
+                self.apps_empty_label.setText("Per-application helper is not installed.")
+            elif self._settings.app_tracking_enabled and not self._netmon_status.running:
+                self.apps_empty_label.setText("Per-application helper is not running.")
+            elif self._settings.app_tracking_enabled:
+                self.apps_empty_label.setText("No application traffic recorded yet.")
+            else:
+                self.apps_empty_label.setText("Per-application tracking is off.")
         self.apps_table.setRowCount(len(rows))
         for row_idx, row in enumerate(rows):
             values = [
@@ -603,6 +733,8 @@ class TrafficMonitorWidget(QWidget):
             up, down = grouped.get(row.date, (0, 0))
             grouped[row.date] = (up + row.uplink_bytes, down + row.downlink_bytes)
         table_rows = sorted(grouped.items())
+        self.history_empty_label.setVisible(not table_rows)
+        self.history_table.setVisible(bool(table_rows))
 
         self.chart.set_usage(rows)
         self.history_table.setRowCount(len(table_rows))
@@ -619,6 +751,7 @@ class TrafficMonitorWidget(QWidget):
         if self._store is None or not self._current_session_id:
             self.session_upload_label.setText("0 B")
             self.session_download_label.setText("0 B")
+            self.session_total_label.setText("0 B")
             return
         if (
             self._last_live_sample is not None
@@ -655,8 +788,17 @@ class TrafficMonitorWidget(QWidget):
                 self._netmon_status.api_url or self._netmon_status.socket_path or "not configured"
             )
             self.helper_response_label.setText(self._netmon_status.last_response or "none")
+            self.helper_error_label.setText(self._netmon_status.last_error or "none")
             self.helper_permission_label.setText("ok" if self._netmon_status.permission_ok else "not available")
             self.kernel_support_label.setText(self._netmon_status.kernel_support)
+
+    def _db_writable(self) -> bool:
+        if self._store is None:
+            return False
+        path = self._store.db_path
+        if path.exists():
+            return os.access(path, os.W_OK)
+        return os.access(path.parent, os.W_OK)
 
     def _sync_settings_controls(self) -> None:
         if not hasattr(self, "proxy_history_checkbox"):
