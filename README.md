@@ -24,6 +24,7 @@ Project status: **beta** (stable for daily use, focused feature scope).
 - Local SOCKS5 + HTTP proxy endpoints (auto-select free ports when needed)
 - Optional desktop system-proxy apply/restore while running
 - Health indicator + ping + speed test + traffic/uptime metrics
+- Traffic Monitor with local proxy/profile usage history, daily totals, simple charts, and advanced optional per-app tracking readiness
 - Diagnostics panel with runtime proxy state and log access
 - Built-in update check against GitHub Releases
 - Light/Dark theme
@@ -31,13 +32,8 @@ Project status: **beta** (stable for daily use, focused feature scope).
 ## Runtime Requirements
 
 - Linux desktop environment (GNOME/KDE/etc.)
-- `xray` available in `PATH`
 
-Quick check:
-
-```bash
-xray version
-```
+Official AppImage, `.deb`, and APT releases include bundled Xray-core for normal operation. Source builds may use bundled vendor files from `./scripts/fetch_xray_core.sh` or a system `xray` from `PATH` as a fallback.
 
 ## Supported Install Methods
 
@@ -160,6 +156,12 @@ Build full release set (PyInstaller + AppImage + `.deb` + checksums):
 ./scripts/build_release.sh
 ```
 
+The release build fetches a pinned official Xray-core release into `vendor/xray/<arch>/` and bundles it into the AppImage and `.deb`. Maintainers can refresh the vendor copy directly:
+
+```bash
+./scripts/fetch_xray_core.sh
+```
+
 Artifacts are written to `dist/`:
 
 - `v2link-client-<version>-linux-<arch>.AppImage`
@@ -208,6 +210,69 @@ GitHub secrets:
 3. Click **Start**.
 4. Enable **System Proxy** for desktop-wide proxying, or use **Copy manual proxy settings**.
 
+The app resolves Xray-core in this order: custom path from **Xray Settings**, bundled Xray, then system `xray` from `PATH`. Diagnostics and About show the active Xray source, path, and version.
+
+## Traffic Monitor
+
+The Traffic Monitor records local traffic history and shows:
+
+- Today upload/download totals
+- Current session upload/download and live speed
+- This month upload/download totals
+- Per saved-profile upload/download totals
+- Daily history with 7-day and 30-day views
+- Advanced **Applications** tab for future per-application tracking
+- Settings for retention, CSV export, and clearing local traffic history
+- Diagnostics for the stats API, helper readiness, and local traffic database
+
+## Proxy/Profile Tracking
+
+Proxy/profile tracking records traffic from Xray's Stats API while the core is running. It works in the normal GUI with no root permission because Xray provides proxy counters through its local API. The app does not use `xray api -reset`, so live labels and history do not fight over counters.
+
+Bundled Xray-core is enough for proxy/profile tracking in official AppImage, `.deb`, and APT installs. Per-application tracking is separate and still needs the optional helper service described below.
+
+Traffic history is stored locally only in SQLite:
+
+```text
+$XDG_DATA_HOME/v2link-client/traffic.sqlite3
+```
+
+If `XDG_DATA_HOME` is not set, the app uses the platform default data directory through `platformdirs`, usually `~/.local/share/v2link-client/traffic.sqlite3` on Linux.
+
+Settings are stored at:
+
+```text
+$XDG_CONFIG_HOME/v2link-client/traffic_settings.json
+```
+
+## Per-Application Tracking
+
+Per-application tracking is advanced and optional. True Linux app attribution needs the optional privileged helper service `v2link-netmon`, because process/executable attribution must happen outside the unprivileged GUI. The GUI never runs as root.
+
+Debian packages install the optional helper and systemd service, but do not enable it automatically:
+
+```bash
+sudo systemctl enable --now v2link-netmon
+sudo systemctl disable --now v2link-netmon
+```
+
+The helper exposes read-only JSON stats over `/run/v2link-client/netmon.sock`. If the helper, permissions, or eBPF backend are unavailable, the GUI stays unprivileged and shows a clear unavailable/diagnostic state.
+
+## Privacy
+
+Traffic history never leaves your machine. Proxy/profile stats come from Xray counters. Application traffic tracking records local process names, executable paths, UIDs, and byte counters only. It does not decrypt traffic, inspect packet payloads, read messages, collect tokens/cookies, or upload telemetry anywhere.
+
+## Limitations
+
+Per-application attribution is not perfect when a local proxy is involved. When system proxy is enabled, apps may connect to `127.0.0.1` while Xray performs the encrypted remote connection, so some traffic can appear under `Xray Core / Proxy Tunnel`. Xray is shown separately and is not hidden.
+
+## Troubleshooting Traffic Monitor
+
+- If proxy/profile totals stay at zero, confirm Xray is running and the diagnostics tab shows a configured stats API server.
+- If the Applications tab says the helper is unavailable, enable the optional service with `sudo systemctl enable --now v2link-netmon`.
+- If the helper is running but eBPF is unavailable, check Traffic Monitor diagnostics for kernel/capability details.
+- AppImage builds work without the helper and will show the helper-unavailable state.
+
 ## Supported Link Scope
 
 Currently implemented:
@@ -227,6 +292,7 @@ Not yet implemented:
 
 - Saved profiles: `$XDG_CONFIG_HOME/v2link-client/profiles.json` (fallback `~/.config/v2link-client/profiles.json`)
 - Preferences/legacy compatibility: `~/.config/v2link-client/profile.json`
+- Optional custom Xray path: `$XDG_CONFIG_HOME/v2link-client/xray_settings.json`
 - Runtime state and generated config: `~/.local/state/v2link-client/`
 - Logs: `~/.local/state/v2link-client/logs/`
 

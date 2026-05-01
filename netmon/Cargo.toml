@@ -1,0 +1,16 @@
+[workspace]
+members = [
+  "v2link-netmon",
+  "v2link-netmon-common",
+  "v2link-netmon-ebpf",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/UdayaSri0/v2link-client"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+todo = "deny"

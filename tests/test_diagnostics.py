@@ -112,7 +112,12 @@ def test_collect_diagnostics_includes_runtime_proxy_state(tmp_path, monkeypatch)
         },
         "xray": {
             "running": True,
-            "binary_path": "/usr/bin/xray",
+            "status": "found",
+            "source": "system-path",
+            "resolved_path": "/usr/bin/xray",
+            "version": "v26.4.25",
+            "geoip_found": False,
+            "geosite_found": False,
             "health_state": "online",
             "health_detail": "55 ms",
             "health_checked_url": "https://www.gstatic.com/generate_204",
@@ -131,7 +136,11 @@ def test_collect_diagnostics_includes_runtime_proxy_state(tmp_path, monkeypatch)
     assert "- Desired vs actual match: no" in report
     assert "- Drift details: mode expected='manual' got='none'" in report
     assert "- Last proxy audit error: temporary failure" in report
-    assert "- Xray binary path: /usr/bin/xray" in report
+    assert "- Xray status: found" in report
+    assert "- Xray source: system PATH" in report
+    assert "- Xray path: /usr/bin/xray" in report
+    assert "- Xray version: v26.4.25" in report
+    assert "- Note: Using system Xray from PATH." in report
     assert "Proxied HTTP/HTTPS probe" in report
     assert "libdconfsettings.so undefined symbol" in report
 

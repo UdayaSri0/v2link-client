@@ -1,0 +1,29 @@
+[Unit]
+Description=v2link-client optional per-application traffic monitor
+Documentation=https://github.com/UdayaSri0/v2link-client
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/v2link-client/v2link-netmon
+RuntimeDirectory=v2link-client
+RuntimeDirectoryMode=0755
+StateDirectory=v2link-client
+Environment=V2LINK_NETMON_SOCKET=/run/v2link-client/netmon.sock
+Environment=V2LINK_NETMON_DB=/var/lib/v2link-client/netmon.sqlite3
+Restart=on-failure
+RestartSec=3
+
+# The helper needs privilege/capabilities for future eBPF program loading.
+# Keep filesystem and process access narrow where compatible with tracing.
+NoNewPrivileges=no
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run/v2link-client /var/lib/v2link-client
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_NET_ADMIN CAP_SYS_ADMIN CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_NET_ADMIN CAP_DAC_READ_SEARCH
+
+[Install]
+WantedBy=multi-user.target
