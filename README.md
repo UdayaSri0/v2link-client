@@ -220,9 +220,11 @@ The Traffic Monitor records local traffic history and shows:
 - Current session upload/download and live speed
 - This month upload/download totals
 - Per saved-profile upload/download totals
-- Daily history with 7-day and 30-day views
+- Daily history with Today, Last 7 days, Last 30 days, This month, and custom date ranges
+- Session history for each selected date, including start/end time, duration, profile, download, upload, total, average speed, and status
+- Session drill-down charts for speed or cumulative usage over time
 - Advanced **Applications** tab for future per-application tracking
-- Settings for retention, CSV export, and clearing local traffic history
+- Settings for detailed sample retention, CSV export, and clearing local traffic history
 - Diagnostics for the stats API, helper readiness, and local traffic database
 
 ## Proxy/Profile Tracking
@@ -230,6 +232,8 @@ The Traffic Monitor records local traffic history and shows:
 Proxy/profile tracking records traffic from Xray's Stats API while the core is running. It works in the normal GUI with no root permission because Xray provides proxy counters through its local API. The app does not use `xray api -reset`, so live labels and history do not fight over counters.
 
 Bundled Xray-core is enough for proxy/profile tracking in official AppImage, `.deb`, and APT installs. Per-application tracking is separate and still needs the optional helper service described below.
+
+Daily totals are aggregated by sample date and are useful for range summaries. Session totals are grouped by each Start/Stop run, so a connection from 20:00 to 20:30 appears as one session under that date. CSV export supports daily summaries, session summaries, and selected-session samples.
 
 Traffic history is stored locally only in SQLite:
 

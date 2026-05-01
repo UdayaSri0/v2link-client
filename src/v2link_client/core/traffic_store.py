@@ -62,6 +62,78 @@ class DailyTrafficUsage:
 
 
 @dataclass(frozen=True, slots=True)
+class ProxySessionSummary:
+    session_id: str
+    profile_id: str | None
+    profile_name: str | None
+    connection_fingerprint: str | None
+    started_at: str
+    ended_at: str | None
+    duration_seconds: int
+    download_bytes: int
+    upload_bytes: int
+    total_bytes: int
+    average_download_bps: float
+    average_upload_bps: float
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProxySessionDetail:
+    session_id: str
+    profile_id: str | None
+    profile_name: str | None
+    connection_fingerprint: str | None
+    started_at: str
+    ended_at: str | None
+    duration_seconds: int
+    download_bytes: int
+    upload_bytes: int
+    total_bytes: int
+    average_download_bps: float
+    average_upload_bps: float
+    status: str
+    xray_api_server: str | None
+    socks_port: int | None
+    http_port: int | None
+    sample_count: int
+    first_sample_at: str | None
+    last_sample_at: str | None
+    peak_download_bps: float
+    peak_upload_bps: float
+    notes: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class HourlyUsage:
+    hour: int
+    download_bytes: int
+    upload_bytes: int
+    total_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class DailyUsageBreakdown:
+    date: str
+    download_bytes: int
+    upload_bytes: int
+    total_bytes: int
+    session_count: int
+    first_session_at: str | None
+    last_session_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class TrafficHistoryDiagnostics:
+    session_count: int
+    sample_count: int
+    oldest_session_at: str | None
+    newest_session_at: str | None
+    unfinished_session_count: int
+    db_file_size_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
 class AppIdentity:
     id: str
     name: str
@@ -159,6 +231,7 @@ class TrafficStore:
     def __init__(self, db_path: Path | None = None) -> None:
         self.db_path = db_path or get_traffic_db_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._active_proxy_session_id: str | None = None
         self._migrate()
 
     def start_proxy_session(
@@ -199,6 +272,7 @@ class TrafficStore:
                     http_port,
                 ),
             )
+        self._active_proxy_session_id = session_id
         return session_id
 
     def record_proxy_sample(
@@ -352,6 +426,8 @@ class TrafficStore:
                 "UPDATE proxy_sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL",
                 (ended_at, session_id),
             )
+        if self._active_proxy_session_id == session_id:
+            self._active_proxy_session_id = None
 
     def get_today_summary(self) -> TrafficUsageSummary:
         today = _now().date().isoformat()
@@ -449,6 +525,210 @@ class TrafficStore:
             for row in rows
         ]
 
+    def get_sessions_for_date(self, date: str) -> list[ProxySessionSummary]:
+        return self.get_sessions_for_range(date, date)
+
+    def get_sessions_for_range(self, start_date: str, end_date: str) -> list[ProxySessionSummary]:
+        start = str(start_date)[:10]
+        end = str(end_date)[:10]
+        if end < start:
+            start, end = end, start
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT s.*,
+                       COUNT(ps.id) AS sample_count,
+                       MIN(ps.timestamp) AS first_sample_at,
+                       MAX(ps.timestamp) AS last_sample_at
+                FROM proxy_sessions s
+                LEFT JOIN proxy_samples ps ON ps.session_id = s.id
+                WHERE substr(s.started_at, 1, 10) >= ?
+                  AND substr(s.started_at, 1, 10) <= ?
+                GROUP BY s.id
+                ORDER BY s.started_at ASC
+                """,
+                (start, end),
+            ).fetchall()
+        return [self._session_summary_from_row(row) for row in rows]
+
+    def get_session_detail(self, session_id: str) -> ProxySessionDetail:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT s.*,
+                       COUNT(ps.id) AS sample_count,
+                       MIN(ps.timestamp) AS first_sample_at,
+                       MAX(ps.timestamp) AS last_sample_at,
+                       COALESCE(MAX(ps.download_bps), 0) AS peak_download_bps,
+                       COALESCE(MAX(ps.upload_bps), 0) AS peak_upload_bps
+                FROM proxy_sessions s
+                LEFT JOIN proxy_samples ps ON ps.session_id = s.id
+                WHERE s.id = ?
+                GROUP BY s.id
+                """,
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"Traffic session not found: {session_id}")
+        summary = self._session_summary_from_row(row)
+        return ProxySessionDetail(
+            session_id=summary.session_id,
+            profile_id=summary.profile_id,
+            profile_name=summary.profile_name,
+            connection_fingerprint=summary.connection_fingerprint,
+            started_at=summary.started_at,
+            ended_at=summary.ended_at,
+            duration_seconds=summary.duration_seconds,
+            download_bytes=summary.download_bytes,
+            upload_bytes=summary.upload_bytes,
+            total_bytes=summary.total_bytes,
+            average_download_bps=summary.average_download_bps,
+            average_upload_bps=summary.average_upload_bps,
+            status=summary.status,
+            xray_api_server=row["xray_api_server"],
+            socks_port=int(row["socks_port"]) if row["socks_port"] is not None else None,
+            http_port=int(row["http_port"]) if row["http_port"] is not None else None,
+            sample_count=int(row["sample_count"] or 0),
+            first_sample_at=str(row["first_sample_at"]) if row["first_sample_at"] is not None else None,
+            last_sample_at=str(row["last_sample_at"]) if row["last_sample_at"] is not None else None,
+            peak_download_bps=max(0.0, float(row["peak_download_bps"] or 0.0)),
+            peak_upload_bps=max(0.0, float(row["peak_upload_bps"] or 0.0)),
+            notes=str(row["notes"]) if row["notes"] else None,
+        )
+
+    def get_session_samples(
+        self,
+        session_id: str,
+        limit: int | None = None,
+    ) -> list[ProxyTrafficSample]:
+        params: list[Any] = [session_id]
+        limit_sql = ""
+        if limit is not None:
+            limit_sql = "LIMIT ?"
+            params.append(max(1, int(limit)))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT session_id, timestamp, uplink_bytes, downlink_bytes,
+                       uplink_delta_bytes, downlink_delta_bytes, upload_bps, download_bps
+                FROM proxy_samples
+                WHERE session_id = ?
+                ORDER BY id ASC
+                {limit_sql}
+                """,
+                tuple(params),
+            ).fetchall()
+        return [self._proxy_sample_from_row(row) for row in rows]
+
+    def get_hourly_usage_for_date(self, date: str) -> list[HourlyUsage]:
+        usage = {hour: [0, 0] for hour in range(24)}
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT CAST(substr(timestamp, 12, 2) AS INTEGER) AS hour,
+                       COALESCE(SUM(downlink_delta_bytes), 0) AS download_bytes,
+                       COALESCE(SUM(uplink_delta_bytes), 0) AS upload_bytes
+                FROM proxy_samples
+                WHERE substr(timestamp, 1, 10) = ?
+                GROUP BY hour
+                ORDER BY hour ASC
+                """,
+                (str(date)[:10],),
+            ).fetchall()
+        for row in rows:
+            hour = int(row["hour"] or 0)
+            if 0 <= hour <= 23:
+                usage[hour] = [
+                    max(0, int(row["download_bytes"] or 0)),
+                    max(0, int(row["upload_bytes"] or 0)),
+                ]
+        return [
+            HourlyUsage(
+                hour=hour,
+                download_bytes=values[0],
+                upload_bytes=values[1],
+                total_bytes=values[0] + values[1],
+            )
+            for hour, values in sorted(usage.items())
+        ]
+
+    def get_daily_usage_breakdown(self, days: int = 30) -> list[DailyUsageBreakdown]:
+        days = max(1, int(days))
+        start_date = (_now().date() - timedelta(days=days - 1)).isoformat()
+        return self.get_daily_usage_breakdown_for_range(start_date, _now().date().isoformat())
+
+    def get_daily_usage_breakdown_for_range(
+        self,
+        start_date: str,
+        end_date: str,
+    ) -> list[DailyUsageBreakdown]:
+        start = str(start_date)[:10]
+        end = str(end_date)[:10]
+        if end < start:
+            start, end = end, start
+        daily: dict[str, dict[str, Any]] = {}
+        with self._connect() as conn:
+            usage_rows = conn.execute(
+                """
+                SELECT date,
+                       COALESCE(SUM(downlink_bytes), 0) AS download_bytes,
+                       COALESCE(SUM(uplink_bytes), 0) AS upload_bytes
+                FROM daily_proxy_usage
+                WHERE date >= ? AND date <= ?
+                GROUP BY date
+                """,
+                (start, end),
+            ).fetchall()
+            session_rows = conn.execute(
+                """
+                SELECT substr(started_at, 1, 10) AS date,
+                       COUNT(*) AS session_count,
+                       MIN(started_at) AS first_session_at,
+                       MAX(COALESCE(ended_at, started_at)) AS last_session_at
+                FROM proxy_sessions
+                WHERE substr(started_at, 1, 10) >= ?
+                  AND substr(started_at, 1, 10) <= ?
+                GROUP BY date
+                """,
+                (start, end),
+            ).fetchall()
+        for row in usage_rows:
+            date = str(row["date"])
+            daily[date] = {
+                "download_bytes": max(0, int(row["download_bytes"] or 0)),
+                "upload_bytes": max(0, int(row["upload_bytes"] or 0)),
+                "session_count": 0,
+                "first_session_at": None,
+                "last_session_at": None,
+            }
+        for row in session_rows:
+            date = str(row["date"])
+            entry = daily.setdefault(
+                date,
+                {
+                    "download_bytes": 0,
+                    "upload_bytes": 0,
+                    "session_count": 0,
+                    "first_session_at": None,
+                    "last_session_at": None,
+                },
+            )
+            entry["session_count"] = max(0, int(row["session_count"] or 0))
+            entry["first_session_at"] = str(row["first_session_at"]) if row["first_session_at"] else None
+            entry["last_session_at"] = str(row["last_session_at"]) if row["last_session_at"] else None
+        return [
+            DailyUsageBreakdown(
+                date=date,
+                download_bytes=int(values["download_bytes"]),
+                upload_bytes=int(values["upload_bytes"]),
+                total_bytes=int(values["download_bytes"]) + int(values["upload_bytes"]),
+                session_count=int(values["session_count"]),
+                first_session_at=values["first_session_at"],
+                last_session_at=values["last_session_at"],
+            )
+            for date, values in sorted(daily.items())
+        ]
+
     def get_recent_samples(
         self,
         session_id: str | None = None,
@@ -473,19 +753,7 @@ class TrafficStore:
                 tuple(params),
             ).fetchall()
         rows.reverse()
-        return [
-            ProxyTrafficSample(
-                session_id=str(row["session_id"]),
-                timestamp=str(row["timestamp"]),
-                uplink_bytes=int(row["uplink_bytes"]),
-                downlink_bytes=int(row["downlink_bytes"]),
-                uplink_delta_bytes=int(row["uplink_delta_bytes"]),
-                downlink_delta_bytes=int(row["downlink_delta_bytes"]),
-                upload_bps=float(row["upload_bps"]),
-                download_bps=float(row["download_bps"]),
-            )
-            for row in rows
-        ]
+        return [self._proxy_sample_from_row(row) for row in rows]
 
     def export_csv(self, path: str | Path, range_days: int = 30) -> None:
         destination = Path(path)
@@ -512,6 +780,120 @@ class TrafficStore:
                         row.uplink_bytes,
                         row.downlink_bytes,
                         row.uplink_bytes + row.downlink_bytes,
+                    ]
+                )
+
+    def export_daily_summary_csv(
+        self,
+        path: str | Path,
+        *,
+        start_date: str,
+        end_date: str,
+    ) -> None:
+        destination = Path(path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        rows = self.get_daily_usage_breakdown_for_range(start_date, end_date)
+        with destination.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                [
+                    "date",
+                    "download_bytes",
+                    "upload_bytes",
+                    "total_bytes",
+                    "session_count",
+                    "first_session_at",
+                    "last_session_at",
+                ]
+            )
+            for row in rows:
+                writer.writerow(
+                    [
+                        row.date,
+                        row.download_bytes,
+                        row.upload_bytes,
+                        row.total_bytes,
+                        row.session_count,
+                        row.first_session_at or "",
+                        row.last_session_at or "",
+                    ]
+                )
+
+    def export_session_summary_csv(
+        self,
+        path: str | Path,
+        *,
+        start_date: str,
+        end_date: str,
+    ) -> None:
+        destination = Path(path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        rows = self.get_sessions_for_range(start_date, end_date)
+        with destination.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                [
+                    "session_id",
+                    "date",
+                    "started_at",
+                    "ended_at",
+                    "duration_seconds",
+                    "profile_id",
+                    "profile_name",
+                    "download_bytes",
+                    "upload_bytes",
+                    "total_bytes",
+                    "average_download_bps",
+                    "average_upload_bps",
+                    "status",
+                ]
+            )
+            for row in rows:
+                writer.writerow(
+                    [
+                        row.session_id,
+                        row.started_at[:10],
+                        row.started_at,
+                        row.ended_at or "",
+                        row.duration_seconds,
+                        row.profile_id or "",
+                        row.profile_name or "",
+                        row.download_bytes,
+                        row.upload_bytes,
+                        row.total_bytes,
+                        f"{row.average_download_bps:.3f}",
+                        f"{row.average_upload_bps:.3f}",
+                        row.status,
+                    ]
+                )
+
+    def export_session_samples_csv(self, path: str | Path, *, session_id: str) -> None:
+        destination = Path(path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        rows = self.get_session_samples(session_id)
+        with destination.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                [
+                    "timestamp",
+                    "uplink_bytes",
+                    "downlink_bytes",
+                    "uplink_delta_bytes",
+                    "downlink_delta_bytes",
+                    "upload_bps",
+                    "download_bps",
+                ]
+            )
+            for row in rows:
+                writer.writerow(
+                    [
+                        row.timestamp,
+                        row.uplink_bytes,
+                        row.downlink_bytes,
+                        row.uplink_delta_bytes,
+                        row.downlink_delta_bytes,
+                        f"{row.upload_bps:.3f}",
+                        f"{row.download_bps:.3f}",
                     ]
                 )
 
@@ -544,6 +926,36 @@ class TrafficStore:
                         row.rx_bytes + row.tx_bytes,
                     ]
                 )
+
+    def cleanup_old_samples(self, retention_days: int) -> int:
+        days = int(retention_days)
+        if days <= 0:
+            return 0
+        cutoff = _to_iso(_now() - timedelta(days=days))
+        with self._connect() as conn:
+            result = conn.execute("DELETE FROM proxy_samples WHERE timestamp < ?", (cutoff,))
+            return int(result.rowcount or 0)
+
+    def get_history_diagnostics(self) -> TrafficHistoryDiagnostics:
+        with self._connect() as conn:
+            sessions = conn.execute(
+                """
+                SELECT COUNT(*) AS session_count,
+                       MIN(started_at) AS oldest_session_at,
+                       MAX(started_at) AS newest_session_at,
+                       SUM(CASE WHEN ended_at IS NULL THEN 1 ELSE 0 END) AS unfinished_session_count
+                FROM proxy_sessions
+                """
+            ).fetchone()
+            samples = conn.execute("SELECT COUNT(*) AS sample_count FROM proxy_samples").fetchone()
+        return TrafficHistoryDiagnostics(
+            session_count=int(sessions["session_count"] or 0) if sessions else 0,
+            sample_count=int(samples["sample_count"] or 0) if samples else 0,
+            oldest_session_at=str(sessions["oldest_session_at"]) if sessions and sessions["oldest_session_at"] else None,
+            newest_session_at=str(sessions["newest_session_at"]) if sessions and sessions["newest_session_at"] else None,
+            unfinished_session_count=int(sessions["unfinished_session_count"] or 0) if sessions else 0,
+            db_file_size_bytes=self.db_path.stat().st_size if self.db_path.exists() else 0,
+        )
 
     def upsert_app(self, identity: AppIdentity, *, now: datetime | None = None) -> str:
         timestamp = _to_iso(now)
@@ -1041,6 +1453,87 @@ class TrafficStore:
             """,
             (date, app_id, rx_delta, tx_delta),
         )
+
+    def _proxy_sample_from_row(self, row: sqlite3.Row) -> ProxyTrafficSample:
+        return ProxyTrafficSample(
+            session_id=str(row["session_id"]),
+            timestamp=str(row["timestamp"]),
+            uplink_bytes=max(0, int(row["uplink_bytes"] or 0)),
+            downlink_bytes=max(0, int(row["downlink_bytes"] or 0)),
+            uplink_delta_bytes=max(0, int(row["uplink_delta_bytes"] or 0)),
+            downlink_delta_bytes=max(0, int(row["downlink_delta_bytes"] or 0)),
+            upload_bps=max(0.0, float(row["upload_bps"] or 0.0)),
+            download_bps=max(0.0, float(row["download_bps"] or 0.0)),
+        )
+
+    def _session_summary_from_row(self, row: sqlite3.Row) -> ProxySessionSummary:
+        session_id = str(row["id"])
+        started_at = str(row["started_at"])
+        ended_at = str(row["ended_at"]) if row["ended_at"] else None
+        first_sample_at = str(row["first_sample_at"]) if "first_sample_at" in row.keys() and row["first_sample_at"] else None
+        last_sample_at = str(row["last_sample_at"]) if "last_sample_at" in row.keys() and row["last_sample_at"] else None
+        sample_count = int(row["sample_count"] or 0) if "sample_count" in row.keys() else 0
+        status = self._session_status(session_id, ended_at=ended_at, sample_count=sample_count)
+        duration = self._session_duration_seconds(
+            started_at=started_at,
+            ended_at=ended_at,
+            last_sample_at=last_sample_at,
+            status=status,
+        )
+        upload = max(0, int(row["total_uplink_bytes"] or 0))
+        download = max(0, int(row["total_downlink_bytes"] or 0))
+        denominator = max(1, duration)
+        return ProxySessionSummary(
+            session_id=session_id,
+            profile_id=str(row["profile_id"]) if row["profile_id"] else None,
+            profile_name=str(row["profile_name"]) if row["profile_name"] else None,
+            connection_fingerprint=str(row["connection_fingerprint"]) if row["connection_fingerprint"] else None,
+            started_at=started_at,
+            ended_at=ended_at,
+            duration_seconds=duration,
+            download_bytes=download,
+            upload_bytes=upload,
+            total_bytes=download + upload,
+            average_download_bps=float(download) / denominator,
+            average_upload_bps=float(upload) / denominator,
+            status=status,
+        )
+
+    def _session_status(self, session_id: str, *, ended_at: str | None, sample_count: int) -> str:
+        if ended_at:
+            return "completed"
+        if self._active_proxy_session_id == session_id:
+            return "active"
+        return "crashed" if sample_count > 0 else "unknown"
+
+    def _session_duration_seconds(
+        self,
+        *,
+        started_at: str,
+        ended_at: str | None,
+        last_sample_at: str | None,
+        status: str,
+    ) -> int:
+        try:
+            start = _parse_iso(started_at)
+        except ValueError:
+            return 0
+        end_text = ended_at
+        if end_text is None and status == "active":
+            end = _now()
+        elif end_text is None:
+            end = _parse_iso(last_sample_at) if last_sample_at else start
+        else:
+            try:
+                end = _parse_iso(end_text)
+            except ValueError:
+                end = start
+        if (start.tzinfo is None) != (end.tzinfo is None):
+            if start.tzinfo is not None:
+                start = start.astimezone().replace(tzinfo=None)
+            if end.tzinfo is not None:
+                end = end.astimezone().replace(tzinfo=None)
+        return max(0, int((end - start).total_seconds()))
 
     def _app_summary_from_row(
         self,

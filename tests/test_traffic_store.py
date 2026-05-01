@@ -240,3 +240,202 @@ def test_clear_history_requires_explicit_call(tmp_path) -> None:
     reopened.clear_history(include_app_tracking=True)
     assert reopened.get_daily_usage(days=365) == []
     assert reopened.get_app_history(days=365) == []
+
+
+def test_session_history_by_date_and_range(tmp_path, monkeypatch) -> None:
+    store = TrafficStore(tmp_path / "traffic.sqlite3")
+    monkeypatch.setattr(
+        traffic_store,
+        "_now",
+        lambda: datetime(2026, 5, 1, 20, 0, 0),
+    )
+    session_one = store.start_proxy_session(
+        "profile-1", "Home", "fingerprint-1", _stats(0, 0), "127.0.0.1:10085", 1080, 8080
+    )
+    store.record_proxy_sample(
+        session_one,
+        _stats(100, 200),
+        now=datetime(2026, 5, 1, 20, 10, 0),
+    )
+    monkeypatch.setattr(
+        traffic_store,
+        "_now",
+        lambda: datetime(2026, 5, 1, 20, 30, 0),
+    )
+    store.end_proxy_session(session_one)
+
+    monkeypatch.setattr(
+        traffic_store,
+        "_now",
+        lambda: datetime(2026, 5, 2, 8, 0, 0),
+    )
+    session_two = store.start_proxy_session(
+        None, "Unsaved profile", "fingerprint-2", _stats(0, 0), "127.0.0.1:10085", 1081, 8081
+    )
+    store.record_proxy_sample(
+        session_two,
+        _stats(50, 75),
+        now=datetime(2026, 5, 2, 8, 5, 0),
+    )
+
+    may_first = store.get_sessions_for_date("2026-05-01")
+    ranged = store.get_sessions_for_range("2026-05-01", "2026-05-02")
+
+    assert [row.session_id for row in may_first] == [session_one]
+    assert [row.session_id for row in ranged] == [session_one, session_two]
+    assert may_first[0].duration_seconds == 1800
+    assert may_first[0].download_bytes == 200
+    assert may_first[0].upload_bytes == 100
+    assert may_first[0].total_bytes == 300
+    assert may_first[0].status == "completed"
+
+
+def test_active_and_crashed_session_status(tmp_path, monkeypatch) -> None:
+    store = TrafficStore(tmp_path / "traffic.sqlite3")
+    monkeypatch.setattr(
+        traffic_store,
+        "_now",
+        lambda: datetime(2026, 5, 1, 20, 0, 0),
+    )
+    session_id = store.start_proxy_session(
+        "profile-1", "Home", "fingerprint", _stats(0, 0), "127.0.0.1:10085", 1080, 8080
+    )
+    store.record_proxy_sample(
+        session_id,
+        _stats(100, 200),
+        now=datetime(2026, 5, 1, 20, 1, 0),
+    )
+    monkeypatch.setattr(
+        traffic_store,
+        "_now",
+        lambda: datetime(2026, 5, 1, 20, 5, 0),
+    )
+
+    active = store.get_session_detail(session_id)
+    reopened = TrafficStore(store.db_path)
+    crashed = reopened.get_session_detail(session_id)
+
+    assert active.status == "active"
+    assert active.duration_seconds == 300
+    assert crashed.status == "crashed"
+    assert crashed.duration_seconds == 60
+
+
+def test_unknown_unfinished_session_without_samples(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        traffic_store,
+        "_now",
+        lambda: datetime(2026, 5, 1, 20, 0, 0),
+    )
+    store = TrafficStore(tmp_path / "traffic.sqlite3")
+    session_id = store.start_proxy_session(
+        "profile-1", "Home", "fingerprint", _stats(0, 0), "127.0.0.1:10085", 1080, 8080
+    )
+    reopened = TrafficStore(store.db_path)
+
+    detail = reopened.get_session_detail(session_id)
+
+    assert detail.status == "unknown"
+    assert detail.duration_seconds == 0
+    assert detail.sample_count == 0
+
+
+def test_hourly_usage_and_daily_breakdown(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        traffic_store,
+        "_now",
+        lambda: datetime(2026, 5, 1, 8, 0, 0),
+    )
+    store = TrafficStore(tmp_path / "traffic.sqlite3")
+    session_id = store.start_proxy_session(
+        "profile-1", "Home", "fingerprint", _stats(0, 0), "127.0.0.1:10085", 1080, 8080
+    )
+    store.record_proxy_sample(
+        session_id,
+        _stats(100, 200),
+        now=datetime(2026, 5, 1, 8, 0, 0),
+    )
+    store.record_proxy_sample(
+        session_id,
+        _stats(150, 260),
+        now=datetime(2026, 5, 1, 9, 0, 0),
+    )
+
+    hourly = store.get_hourly_usage_for_date("2026-05-01")
+    monkeypatch.setattr(
+        traffic_store,
+        "_now",
+        lambda: datetime(2026, 5, 2, 12, 0, 0),
+    )
+    daily = store.get_daily_usage_breakdown(days=2)
+
+    assert len(hourly) == 24
+    assert hourly[8].upload_bytes == 100
+    assert hourly[8].download_bytes == 200
+    assert hourly[9].upload_bytes == 50
+    assert hourly[9].download_bytes == 60
+    may_first = next(row for row in daily if row.date == "2026-05-01")
+    assert may_first.session_count == 1
+    assert may_first.upload_bytes == 150
+    assert may_first.download_bytes == 260
+
+
+def test_session_samples_and_csv_exports(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        traffic_store,
+        "_now",
+        lambda: datetime(2026, 5, 1, 20, 0, 0),
+    )
+    store = TrafficStore(tmp_path / "traffic.sqlite3")
+    session_id = store.start_proxy_session(
+        "profile-1", "Home", "fingerprint", _stats(0, 0), "127.0.0.1:10085", 1080, 8080
+    )
+    store.record_proxy_sample(
+        session_id,
+        _stats(100, 200),
+        now=datetime(2026, 5, 1, 20, 1, 0),
+    )
+    store.record_proxy_sample(
+        session_id,
+        _stats(125, 250),
+        now=datetime(2026, 5, 1, 20, 2, 0),
+    )
+
+    assert len(store.get_session_samples(session_id)) == 2
+
+    daily_path = tmp_path / "daily.csv"
+    sessions_path = tmp_path / "sessions.csv"
+    samples_path = tmp_path / "samples.csv"
+    store.export_daily_summary_csv(daily_path, start_date="2026-05-01", end_date="2026-05-01")
+    store.export_session_summary_csv(sessions_path, start_date="2026-05-01", end_date="2026-05-01")
+    store.export_session_samples_csv(samples_path, session_id=session_id)
+
+    assert "date,download_bytes,upload_bytes,total_bytes,session_count" in daily_path.read_text(encoding="utf-8")
+    assert "session_id,date,started_at,ended_at,duration_seconds" in sessions_path.read_text(encoding="utf-8")
+    assert session_id in sessions_path.read_text(encoding="utf-8")
+    assert "timestamp,uplink_bytes,downlink_bytes,uplink_delta_bytes" in samples_path.read_text(encoding="utf-8")
+    assert "20:02:00" in samples_path.read_text(encoding="utf-8")
+
+
+def test_retention_cleanup_deletes_old_samples_but_keeps_summaries(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        traffic_store,
+        "_now",
+        lambda: datetime(2026, 5, 10, 12, 0, 0),
+    )
+    store = TrafficStore(tmp_path / "traffic.sqlite3")
+    session_id = store.start_proxy_session(
+        "profile-1", "Home", "fingerprint", _stats(0, 0), "127.0.0.1:10085", 1080, 8080
+    )
+    store.record_proxy_sample(
+        session_id,
+        _stats(100, 200),
+        now=datetime(2026, 5, 1, 20, 1, 0),
+    )
+
+    deleted = store.cleanup_old_samples(7)
+
+    assert deleted == 1
+    assert store.get_session_samples(session_id) == []
+    assert store.get_sessions_for_date("2026-05-10")
+    assert store.get_daily_usage_breakdown_for_range("2026-05-01", "2026-05-10")
