@@ -8,11 +8,9 @@ The UI intentionally keeps policy decisions simple:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import errno
 import logging
 from pathlib import Path
-import shutil
 import socket
 import subprocess
 from typing import IO
@@ -24,24 +22,27 @@ from v2link_client.core.errors import (
     PortInUseError,
 )
 from v2link_client.core.storage import get_logs_dir
+from v2link_client.core.system_subprocess import build_host_subprocess_env
+from v2link_client.core.xray_locator import (
+    MISSING_XRAY_MESSAGE,
+    XrayBinary,
+    find_xray_binary as locate_xray_binary,
+)
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True, slots=True)
-class CoreBinary:
-    name: str
-    path: str
+CoreBinary = XrayBinary
 
 
 def find_xray_binary() -> CoreBinary:
-    path = shutil.which("xray")
-    if not path:
+    xray = locate_xray_binary()
+    if not xray.valid or not xray.path:
         raise BinaryMissingError(
-            "xray not found in PATH",
-            user_message="Xray-core binary not found. Install `xray` or add it to PATH.",
+            xray.error or MISSING_XRAY_MESSAGE,
+            user_message=xray.error or MISSING_XRAY_MESSAGE,
         )
-    return CoreBinary(name="xray", path=path)
+    return xray
 
 
 def ensure_port_available(host: str, port: int) -> None:
@@ -70,8 +71,19 @@ def find_free_port(host: str) -> int:
 
 
 def validate_xray_config(xray: CoreBinary, config_path: Path, *, timeout_s: float = 5) -> None:
+    if not xray.path:
+        raise BinaryMissingError(
+            xray.error or MISSING_XRAY_MESSAGE,
+            user_message=xray.error or MISSING_XRAY_MESSAGE,
+        )
     cmd = [xray.path, "run", "-test", "-c", str(config_path)]
-    logger.info("Validating xray config: %s", cmd)
+    env, env_info = build_host_subprocess_env()
+    logger.info(
+        "Validating xray config: %s [env_mode=%s removed_env=%s]",
+        cmd,
+        env_info.mode,
+        ",".join(env_info.removed_keys) or "none",
+    )
     try:
         result = subprocess.run(
             cmd,
@@ -79,6 +91,7 @@ def validate_xray_config(xray: CoreBinary, config_path: Path, *, timeout_s: floa
             capture_output=True,
             text=True,
             timeout=timeout_s,
+            env=env,
         )
     except FileNotFoundError as exc:
         raise BinaryMissingError(
@@ -124,6 +137,12 @@ class XrayProcessManager:
     def stdout_path(self) -> Path | None:
         return self._stdout_path
 
+    @property
+    def binary_path(self) -> str | None:
+        if self._xray is None:
+            return None
+        return self._xray.path
+
     def is_running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
@@ -137,17 +156,24 @@ class XrayProcessManager:
             return
 
         xray = self._ensure_binary()
+        if not xray.path:
+            raise BinaryMissingError(
+                xray.error or MISSING_XRAY_MESSAGE,
+                user_message=xray.error or MISSING_XRAY_MESSAGE,
+            )
         logs_dir = get_logs_dir()
         logs_dir.mkdir(parents=True, exist_ok=True)
         self._stdout_path = logs_dir / "xray_stdout.log"
         self._stdout_handle = self._stdout_path.open("a", encoding="utf-8")
 
         cmd = [xray.path, "run", "-c", str(config_path)]
+        env, env_info = build_host_subprocess_env()
         try:
             self._proc = subprocess.Popen(
                 cmd,
                 stdout=self._stdout_handle,
                 stderr=subprocess.STDOUT,
+                env=env,
             )
         except FileNotFoundError as exc:
             raise BinaryMissingError(
@@ -160,7 +186,12 @@ class XrayProcessManager:
                 user_message=f"{xray.name} binary is not executable: {xray.path}",
             ) from exc
 
-        logger.info("Started xray pid=%s", self._proc.pid)
+        logger.info(
+            "Started xray pid=%s [env_mode=%s removed_env=%s]",
+            self._proc.pid,
+            env_info.mode,
+            ",".join(env_info.removed_keys) or "none",
+        )
 
     def stop(self, *, timeout_s: float = 5) -> None:
         if self._proc is None:

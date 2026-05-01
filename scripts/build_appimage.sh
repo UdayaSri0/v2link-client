@@ -94,21 +94,51 @@ ARCH_NAME="${ARCH:-$(normalize_arch)}"
 VERSION_NAME="$(detect_version)"
 APPIMAGE_TOOL_BIN="$(resolve_appimagetool)"
 OUTPUT_FILE="${DIST_DIR}/${APP_NAME}-${VERSION_NAME}-linux-${ARCH_NAME}.AppImage"
+XRAY_VENDOR_DIR="${ROOT_DIR}/vendor/xray/${ARCH_NAME}"
+
+ensure_bundled_xray() {
+  if [[ ! -x "${XRAY_VENDOR_DIR}/xray" || ! -f "${XRAY_VENDOR_DIR}/geoip.dat" || ! -f "${XRAY_VENDOR_DIR}/geosite.dat" ]]; then
+    ARCH="${ARCH_NAME}" "${ROOT_DIR}/scripts/fetch_xray_core.sh"
+  fi
+  for required_file in xray geoip.dat geosite.dat LICENSE VERSION; do
+    if [[ ! -e "${XRAY_VENDOR_DIR}/${required_file}" ]]; then
+      echo "Error: bundled Xray file missing: ${XRAY_VENDOR_DIR}/${required_file}" >&2
+      exit 1
+    fi
+  done
+}
+
+ensure_bundled_xray
 
 rm -rf "${APPDIR}"
-mkdir -p "${APPDIR}/usr/bin"
+mkdir -p "${APPDIR}/usr/bin" "${APPDIR}/usr/bin/xray"
 cp -a "${PYINSTALLER_DIR}/." "${APPDIR}/usr/bin/"
+cp "${XRAY_VENDOR_DIR}/xray" "${APPDIR}/usr/bin/xray/xray"
+cp "${XRAY_VENDOR_DIR}/geoip.dat" "${APPDIR}/usr/bin/xray/geoip.dat"
+cp "${XRAY_VENDOR_DIR}/geosite.dat" "${APPDIR}/usr/bin/xray/geosite.dat"
+cp "${XRAY_VENDOR_DIR}/LICENSE" "${APPDIR}/usr/bin/xray/LICENSE"
+cp "${XRAY_VENDOR_DIR}/VERSION" "${APPDIR}/usr/bin/xray/VERSION"
 cp "${DESKTOP_SRC}" "${APPDIR}/${APP_NAME}.desktop"
 cp "${ICON_SRC}" "${APPDIR}/${APP_NAME}.png"
+chmod 0755 "${APPDIR}/usr/bin/xray/xray"
 
 cat >"${APPDIR}/AppRun" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 APPDIR="\$(cd "\$(dirname "\$0")" && pwd)"
 export V2LINK_CLIENT_VERSION="${VERSION_NAME}"
+export V2LINK_BUNDLED_XRAY_DIR="\${APPDIR}/usr/bin/xray"
+export XRAY_LOCATION_ASSET="\${APPDIR}/usr/bin/xray"
 exec "\${APPDIR}/usr/bin/v2link-client" "\$@"
 EOF
 chmod +x "${APPDIR}/AppRun"
+
+for required_file in xray geoip.dat geosite.dat LICENSE VERSION; do
+  if [[ ! -e "${APPDIR}/usr/bin/xray/${required_file}" ]]; then
+    echo "Error: AppDir missing bundled Xray file: ${required_file}" >&2
+    exit 1
+  fi
+done
 
 rm -f "${OUTPUT_FILE}"
 echo "Building AppImage with ${APPIMAGE_TOOL_BIN}..."

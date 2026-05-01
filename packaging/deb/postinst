@@ -9,4 +9,21 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
   gtk-update-icon-cache -q /usr/share/icons/hicolor || true
 fi
 
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload || true
+fi
+
+cat <<'EOF'
+v2link-netmon optional helper installed.
+
+The helper is local-only and provides read-only per-application traffic
+metadata to v2link-client when enabled. It is not enabled automatically.
+
+Enable:
+  sudo systemctl enable --now v2link-netmon
+
+Disable:
+  sudo systemctl disable --now v2link-netmon
+EOF
+
 exit 0

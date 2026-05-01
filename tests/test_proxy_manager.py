@@ -45,7 +45,8 @@ def _fake_run_factory(
     *,
     ignore_manual_mode_set: bool = False,
 ):
-    def fake_run(cmd, check, capture_output, text, timeout):  # noqa: ANN001
+    def fake_run(cmd, check, capture_output, text, timeout, env):  # noqa: ANN001
+        assert "LD_LIBRARY_PATH" not in env
         calls.append(list(cmd))
 
         if cmd[:2] == ["gsettings", "list-keys"] and len(cmd) == 3:
@@ -78,7 +79,7 @@ def _set_commands(calls: list[list[str]]) -> list[list[str]]:
 
 
 def test_system_proxy_apply_unsupported_backend(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(pm.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(pm, "system_which", lambda _name: None)
     mgr = SystemProxyManager(state_dir=tmp_path)
     with pytest.raises(ProxyApplyError):
         mgr.apply(
@@ -96,7 +97,7 @@ def test_apply_verification_detects_mode_mismatch(tmp_path, monkeypatch) -> None
     calls: list[list[str]] = []
     state = _default_gsettings_state()
 
-    monkeypatch.setattr(pm.shutil, "which", lambda _name: "/usr/bin/gsettings")
+    monkeypatch.setattr(pm, "system_which", lambda _name: "/usr/bin/gsettings")
     monkeypatch.setattr(
         pm.subprocess,
         "run",
@@ -126,7 +127,7 @@ def test_restore_mode_none_restores_exact_snapshot_state(tmp_path, monkeypatch) 
     state[("org.gnome.system.proxy.http", "port")] = "8080"
     initial_state = dict(state)
 
-    monkeypatch.setattr(pm.shutil, "which", lambda _name: "/usr/bin/gsettings")
+    monkeypatch.setattr(pm, "system_which", lambda _name: "/usr/bin/gsettings")
     monkeypatch.setattr(pm.subprocess, "run", _fake_run_factory(state, calls))
 
     mgr = SystemProxyManager(state_dir=tmp_path)
@@ -160,7 +161,7 @@ def test_restore_mode_manual_preserves_snapshot(tmp_path, monkeypatch) -> None:
     calls: list[list[str]] = []
     state = _default_gsettings_state()
 
-    monkeypatch.setattr(pm.shutil, "which", lambda _name: "/usr/bin/gsettings")
+    monkeypatch.setattr(pm, "system_which", lambda _name: "/usr/bin/gsettings")
     monkeypatch.setattr(pm.subprocess, "run", _fake_run_factory(state, calls))
 
     mgr = SystemProxyManager(state_dir=tmp_path)
@@ -196,7 +197,7 @@ def test_restore_backward_compatible_with_old_snapshot_keys(tmp_path, monkeypatc
     calls: list[list[str]] = []
     state = _default_gsettings_state()
 
-    monkeypatch.setattr(pm.shutil, "which", lambda _name: "/usr/bin/gsettings")
+    monkeypatch.setattr(pm, "system_which", lambda _name: "/usr/bin/gsettings")
     monkeypatch.setattr(pm.subprocess, "run", _fake_run_factory(state, calls))
 
     mgr = SystemProxyManager(state_dir=tmp_path)
@@ -231,7 +232,7 @@ def test_restore_missing_snapshot_falls_back_to_no_proxy(tmp_path, monkeypatch) 
     state[("org.gnome.system.proxy.http", "host")] = "'127.0.0.1'"
     state[("org.gnome.system.proxy.http", "port")] = "8080"
 
-    monkeypatch.setattr(pm.shutil, "which", lambda _name: "/usr/bin/gsettings")
+    monkeypatch.setattr(pm, "system_which", lambda _name: "/usr/bin/gsettings")
     monkeypatch.setattr(pm.subprocess, "run", _fake_run_factory(state, calls))
 
     mgr = SystemProxyManager(state_dir=tmp_path)
@@ -247,7 +248,7 @@ def test_restore_corrupt_snapshot_falls_back_to_no_proxy(tmp_path, monkeypatch) 
     state = _default_gsettings_state()
     state[("org.gnome.system.proxy", "mode")] = "'manual'"
 
-    monkeypatch.setattr(pm.shutil, "which", lambda _name: "/usr/bin/gsettings")
+    monkeypatch.setattr(pm, "system_which", lambda _name: "/usr/bin/gsettings")
     monkeypatch.setattr(pm.subprocess, "run", _fake_run_factory(state, calls))
 
     snap_path = tmp_path / pm.SNAPSHOT_FILE
@@ -274,7 +275,7 @@ def test_repair_stale_loopback_proxy_repairs(tmp_path, monkeypatch) -> None:
     state[("org.gnome.system.proxy.https", "host")] = "'127.0.0.1'"
     state[("org.gnome.system.proxy.https", "port")] = "8080"
 
-    monkeypatch.setattr(pm.shutil, "which", lambda _name: "/usr/bin/gsettings")
+    monkeypatch.setattr(pm, "system_which", lambda _name: "/usr/bin/gsettings")
     monkeypatch.setattr(pm.subprocess, "run", _fake_run_factory(state, calls))
 
     def fake_create_connection(*_args, **_kwargs):  # noqa: ANN001
@@ -296,7 +297,7 @@ def test_repair_stale_loopback_proxy_noop_when_proxy_is_reachable(tmp_path, monk
     state[("org.gnome.system.proxy.http", "host")] = "'127.0.0.1'"
     state[("org.gnome.system.proxy.http", "port")] = "8080"
 
-    monkeypatch.setattr(pm.shutil, "which", lambda _name: "/usr/bin/gsettings")
+    monkeypatch.setattr(pm, "system_which", lambda _name: "/usr/bin/gsettings")
     monkeypatch.setattr(pm.subprocess, "run", _fake_run_factory(state, calls))
 
     class DummySocket:
@@ -314,7 +315,7 @@ def test_apply_success_sets_manual_proxy_and_snapshot(tmp_path, monkeypatch) -> 
     calls: list[list[str]] = []
     state = _default_gsettings_state()
 
-    monkeypatch.setattr(pm.shutil, "which", lambda _name: "/usr/bin/gsettings")
+    monkeypatch.setattr(pm, "system_which", lambda _name: "/usr/bin/gsettings")
     monkeypatch.setattr(pm.subprocess, "run", _fake_run_factory(state, calls))
 
     mgr = SystemProxyManager(state_dir=tmp_path)
@@ -341,7 +342,7 @@ def test_restore_if_needed_recovers_snapshot_from_previous_session(tmp_path, mon
     calls: list[list[str]] = []
     state = _default_gsettings_state()
 
-    monkeypatch.setattr(pm.shutil, "which", lambda _name: "/usr/bin/gsettings")
+    monkeypatch.setattr(pm, "system_which", lambda _name: "/usr/bin/gsettings")
     monkeypatch.setattr(pm.subprocess, "run", _fake_run_factory(state, calls))
 
     first = SystemProxyManager(state_dir=tmp_path, session_id="session-a")
@@ -368,7 +369,7 @@ def test_audit_runtime_detects_drift_and_reapplies(tmp_path, monkeypatch) -> Non
     calls: list[list[str]] = []
     state = _default_gsettings_state()
 
-    monkeypatch.setattr(pm.shutil, "which", lambda _name: "/usr/bin/gsettings")
+    monkeypatch.setattr(pm, "system_which", lambda _name: "/usr/bin/gsettings")
     monkeypatch.setattr(pm.subprocess, "run", _fake_run_factory(state, calls))
 
     cfg = SystemProxyConfig(
@@ -399,9 +400,10 @@ def test_audit_runtime_detects_drift_and_reapplies(tmp_path, monkeypatch) -> Non
 def test_backend_warning_history_records_rc0_stderr_warning(monkeypatch) -> None:
     pm._BACKEND_WARNING_HISTORY.clear()
 
-    monkeypatch.setattr(pm.shutil, "which", lambda _name: "/usr/bin/gsettings")
+    monkeypatch.setattr(pm, "system_which", lambda _name: "/usr/bin/gsettings")
 
-    def fake_run(cmd, check, capture_output, text, timeout):  # noqa: ANN001
+    def fake_run(cmd, check, capture_output, text, timeout, env):  # noqa: ANN001
+        assert "LD_LIBRARY_PATH" not in env
         if cmd[:2] == ["gsettings", "list-keys"]:
             return subprocess.CompletedProcess(
                 cmd,
@@ -423,7 +425,7 @@ def test_restore_if_needed_skips_snapshot_owned_by_live_other_pid(tmp_path, monk
     calls: list[list[str]] = []
     state = _default_gsettings_state()
 
-    monkeypatch.setattr(pm.shutil, "which", lambda _name: "/usr/bin/gsettings")
+    monkeypatch.setattr(pm, "system_which", lambda _name: "/usr/bin/gsettings")
     monkeypatch.setattr(pm.subprocess, "run", _fake_run_factory(state, calls))
 
     sleeper = subprocess.Popen(["sleep", "30"])
@@ -457,7 +459,7 @@ def test_restore_if_owned_skips_snapshot_from_other_session(tmp_path, monkeypatc
     calls: list[list[str]] = []
     state = _default_gsettings_state()
 
-    monkeypatch.setattr(pm.shutil, "which", lambda _name: "/usr/bin/gsettings")
+    monkeypatch.setattr(pm, "system_which", lambda _name: "/usr/bin/gsettings")
     monkeypatch.setattr(pm.subprocess, "run", _fake_run_factory(state, calls))
 
     snap_path = tmp_path / pm.SNAPSHOT_FILE
