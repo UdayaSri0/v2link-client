@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 export V2LINK_CLIENT_VERSION="@VERSION@"
+export V2LINK_BUNDLED_XRAY_DIR="/opt/v2link-client/xray"
+export XRAY_LOCATION_ASSET="/opt/v2link-client/xray"
 exec /opt/v2link-client/v2link-client "$@"

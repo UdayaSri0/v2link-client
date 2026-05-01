@@ -32,13 +32,8 @@ Project status: **beta** (stable for daily use, focused feature scope).
 ## Runtime Requirements
 
 - Linux desktop environment (GNOME/KDE/etc.)
-- `xray` available in `PATH`
 
-Quick check:
-
-```bash
-xray version
-```
+Official AppImage, `.deb`, and APT releases include bundled Xray-core for normal operation. Source builds may use bundled vendor files from `./scripts/fetch_xray_core.sh` or a system `xray` from `PATH` as a fallback.
 
 ## Supported Install Methods
 
@@ -161,6 +156,12 @@ Build full release set (PyInstaller + AppImage + `.deb` + checksums):
 ./scripts/build_release.sh
 ```
 
+The release build fetches a pinned official Xray-core release into `vendor/xray/<arch>/` and bundles it into the AppImage and `.deb`. Maintainers can refresh the vendor copy directly:
+
+```bash
+./scripts/fetch_xray_core.sh
+```
+
 Artifacts are written to `dist/`:
 
 - `v2link-client-<version>-linux-<arch>.AppImage`
@@ -209,6 +210,8 @@ GitHub secrets:
 3. Click **Start**.
 4. Enable **System Proxy** for desktop-wide proxying, or use **Copy manual proxy settings**.
 
+The app resolves Xray-core in this order: custom path from **Xray Settings**, bundled Xray, then system `xray` from `PATH`. Diagnostics and About show the active Xray source, path, and version.
+
 ## Traffic Monitor
 
 The Traffic Monitor records local traffic history and shows:
@@ -225,6 +228,8 @@ The Traffic Monitor records local traffic history and shows:
 ## Proxy/Profile Tracking
 
 Proxy/profile tracking records traffic from Xray's Stats API while the core is running. It works in the normal GUI with no root permission because Xray provides proxy counters through its local API. The app does not use `xray api -reset`, so live labels and history do not fight over counters.
+
+Bundled Xray-core is enough for proxy/profile tracking in official AppImage, `.deb`, and APT installs. Per-application tracking is separate and still needs the optional helper service described below.
 
 Traffic history is stored locally only in SQLite:
 
@@ -287,6 +292,7 @@ Not yet implemented:
 
 - Saved profiles: `$XDG_CONFIG_HOME/v2link-client/profiles.json` (fallback `~/.config/v2link-client/profiles.json`)
 - Preferences/legacy compatibility: `~/.config/v2link-client/profile.json`
+- Optional custom Xray path: `$XDG_CONFIG_HOME/v2link-client/xray_settings.json`
 - Runtime state and generated config: `~/.local/state/v2link-client/`
 - Logs: `~/.local/state/v2link-client/logs/`
 

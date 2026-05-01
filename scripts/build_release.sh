@@ -41,8 +41,10 @@ echo "Building release artifacts for v${VERSION_NAME}..."
 mkdir -p "${DIST_DIR}"
 rm -f "${DIST_DIR}"/*.AppImage "${DIST_DIR}"/*.deb "${DIST_DIR}/SHA256SUMS"
 
+"${ROOT_DIR}/scripts/fetch_xray_core.sh"
 "${ROOT_DIR}/scripts/build_pyinstaller.sh"
 "${ROOT_DIR}/scripts/build_appimage.sh"
+"${ROOT_DIR}/scripts/build_netmon.sh"
 "${ROOT_DIR}/scripts/build_deb.sh"
 
 if ! compgen -G "${DIST_DIR}/*.AppImage" >/dev/null; then
@@ -52,6 +54,33 @@ fi
 
 if ! compgen -G "${DIST_DIR}/*.deb" >/dev/null; then
   echo "Error: no .deb artifact found in ${DIST_DIR}" >&2
+  exit 1
+fi
+
+if [[ ! -x "${ROOT_DIR}/build/AppDir/usr/bin/xray/xray" ]]; then
+  echo "Error: AppImage layout missing bundled Xray binary." >&2
+  exit 1
+fi
+if [[ ! -f "${ROOT_DIR}/build/AppDir/usr/bin/xray/geoip.dat" || ! -f "${ROOT_DIR}/build/AppDir/usr/bin/xray/geosite.dat" ]]; then
+  echo "Error: AppImage layout missing bundled Xray geo assets." >&2
+  exit 1
+fi
+
+DEB_TREE="$(find "${ROOT_DIR}/build/deb" -maxdepth 1 -type d -name 'v2link-client_*' | sort | tail -n 1)"
+if [[ -z "${DEB_TREE}" ]]; then
+  echo "Error: Debian package tree not found." >&2
+  exit 1
+fi
+if [[ ! -x "${DEB_TREE}/opt/v2link-client/xray/xray" ]]; then
+  echo "Error: .deb layout missing bundled Xray binary." >&2
+  exit 1
+fi
+if [[ ! -f "${DEB_TREE}/opt/v2link-client/xray/geoip.dat" || ! -f "${DEB_TREE}/opt/v2link-client/xray/geosite.dat" ]]; then
+  echo "Error: .deb layout missing bundled Xray geo assets." >&2
+  exit 1
+fi
+if [[ ! -x "${DEB_TREE}/usr/lib/v2link-client/v2link-netmon" ]]; then
+  echo "Error: .deb layout missing v2link-netmon helper." >&2
   exit 1
 fi
 

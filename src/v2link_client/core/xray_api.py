@@ -73,7 +73,10 @@ def statsquery(
     except FileNotFoundError as exc:
         raise BinaryMissingError(
             f"xray binary missing: {xray_path}",
-            user_message="Xray-core binary not found. Install `xray` or add it to PATH.",
+            user_message=(
+                "Xray-core was not found. This build may be incomplete. Please install the official "
+                "v2link-client AppImage/.deb package, or configure a custom Xray path."
+            ),
         ) from exc
     except subprocess.TimeoutExpired as exc:
         raise XrayApiError(

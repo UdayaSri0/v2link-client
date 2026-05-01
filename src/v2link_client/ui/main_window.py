@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -62,10 +63,18 @@ from v2link_client.core.process_manager import (
 )
 from v2link_client.core.speed_test import SpeedTestResult, run_speed_test_via_http_proxy
 from v2link_client.core.storage import get_config_dir, get_state_dir, load_json, save_json
+from v2link_client.core.system_subprocess import detect_runtime_kind
 from v2link_client.core.traffic_settings import TrafficSettings, load_traffic_settings
 from v2link_client.core.traffic_store import ProxyTrafficSample, TrafficStore
 from v2link_client.core.update_check import UpdateCheckResult, check_for_updates
 from v2link_client.core.xray_api import TrafficStats, get_outbound_traffic
+from v2link_client.core.xray_locator import (
+    XrayBinary,
+    find_xray_binary as locate_xray_binary,
+    validate_xray_binary,
+    xray_asset_status,
+)
+from v2link_client.core.xray_settings import XraySettings, load_xray_settings, save_xray_settings
 from v2link_client.ui.diagnostics_widget import DiagnosticsWidget
 from v2link_client.ui.profile_dialogs import ProfileEditorDialog, ProfileManagerDialog
 from v2link_client.ui.theme import ThemeName, apply_theme, normalize_theme, theme_display_name
@@ -177,6 +186,10 @@ class MainWindow(QMainWindow):
         self.check_updates_button.clicked.connect(self._on_check_updates_clicked)
         self.check_updates_button.setProperty("variant", "ghost")
 
+        self.xray_settings_button = QPushButton("Xray Settings")
+        self.xray_settings_button.clicked.connect(self._show_xray_settings)
+        self.xray_settings_button.setProperty("variant", "ghost")
+
         self.about_button = QPushButton("About")
         self.about_button.clicked.connect(self._show_about)
         self.about_button.setProperty("variant", "ghost")
@@ -227,6 +240,7 @@ class MainWindow(QMainWindow):
         help_row.addWidget(QLabel("Help"))
         help_row.addStretch(1)
         help_row.addWidget(self.check_updates_button)
+        help_row.addWidget(self.xray_settings_button)
         help_row.addWidget(self.about_button)
 
         self.diagnostics_widget = DiagnosticsWidget()
@@ -274,6 +288,7 @@ class MainWindow(QMainWindow):
         central.setLayout(layout)
 
         self._process = XrayProcessManager()
+        self._last_xray_resolution: XrayBinary = locate_xray_binary()
         self._validated_config_path = None
         self._validated_link = None
         self._validated_fingerprint: str | None = None
@@ -373,10 +388,149 @@ class MainWindow(QMainWindow):
         self.about_action.triggered.connect(self._show_about)
         help_menu.addAction(self.about_action)
 
+    def _current_xray_resolution(self, *, refresh: bool = False) -> XrayBinary:
+        process_binary = getattr(self._process, "_xray", None)
+        if isinstance(process_binary, XrayBinary):
+            self._last_xray_resolution = process_binary
+            return process_binary
+        if refresh:
+            self._last_xray_resolution = locate_xray_binary()
+        return self._last_xray_resolution
+
+    def _xray_source_label(self, source: str | None) -> str:
+        if source == "user-configured":
+            return "user configured"
+        if source == "system-path":
+            return "system PATH"
+        return "bundled"
+
+    def _xray_status_summary(self, xray: XrayBinary) -> str:
+        if xray.valid:
+            return f"{xray.version or 'unknown version'} ({self._xray_source_label(xray.source)})"
+        return xray.error or "Xray-core was not found."
+
+    def _show_xray_settings(self) -> None:
+        if self._process.is_running():
+            QMessageBox.warning(
+                self,
+                "Xray Settings",
+                "Stop the core before changing the Xray binary.",
+            )
+            return
+
+        settings = load_xray_settings()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Xray Settings")
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(10)
+
+        custom_checkbox = QCheckBox("Use custom Xray binary")
+        custom_checkbox.setChecked(settings.use_custom_binary)
+        path_input = QLineEdit(settings.custom_binary_path or "")
+        path_input.setPlaceholderText("Choose an xray executable")
+
+        browse_button = QPushButton("Browse")
+        reset_button = QPushButton("Reset to bundled/default")
+        validate_button = QPushButton("Validate")
+        save_button = QPushButton("Save")
+        cancel_button = QPushButton("Cancel")
+        status_label = QLabel("")
+        status_label.setWordWrap(True)
+        status_label.setProperty("role", "hint")
+
+        path_row = QHBoxLayout()
+        path_row.addWidget(path_input, 1)
+        path_row.addWidget(browse_button)
+
+        button_row = QHBoxLayout()
+        button_row.addWidget(reset_button)
+        button_row.addStretch(1)
+        button_row.addWidget(validate_button)
+        button_row.addWidget(cancel_button)
+        button_row.addWidget(save_button)
+
+        layout.addWidget(custom_checkbox)
+        layout.addLayout(path_row)
+        layout.addWidget(status_label)
+        layout.addLayout(button_row)
+
+        def update_enabled() -> None:
+            enabled = custom_checkbox.isChecked()
+            path_input.setEnabled(enabled)
+            browse_button.setEnabled(enabled)
+            validate_button.setEnabled(enabled)
+
+        def choose_file() -> None:
+            selected, _selected_filter = QFileDialog.getOpenFileName(
+                dialog,
+                "Choose Xray binary",
+                path_input.text().strip() or str(Path.home()),
+            )
+            if selected:
+                path_input.setText(selected)
+
+        def validate_current() -> XrayBinary:
+            if custom_checkbox.isChecked():
+                result = validate_xray_binary(path_input.text().strip(), source="user-configured")
+            else:
+                result = locate_xray_binary()
+            status_label.setText(
+                f"Valid Xray-core: {self._xray_status_summary(result)}"
+                if result.valid
+                else result.error or "Xray-core was not found."
+            )
+            return result
+
+        def reset_default() -> None:
+            custom_checkbox.setChecked(False)
+            path_input.clear()
+            update_enabled()
+            validate_current()
+
+        def save_current() -> None:
+            if custom_checkbox.isChecked():
+                result = validate_current()
+                if not result.valid:
+                    QMessageBox.warning(
+                        dialog,
+                        "Invalid Xray Binary",
+                        result.error or "Selected file is not a valid Xray-core binary.",
+                    )
+                    return
+                save_xray_settings(
+                    XraySettings(
+                        use_custom_binary=True,
+                        custom_binary_path=path_input.text().strip(),
+                    )
+                )
+            else:
+                save_xray_settings(XraySettings())
+                result = locate_xray_binary()
+
+            self._last_xray_resolution = result
+            self._reset_validation_state()
+            self.diagnostics_widget.set_hint(
+                f"Xray settings updated: {self._xray_status_summary(result)}"
+            )
+            dialog.accept()
+
+        custom_checkbox.toggled.connect(lambda _checked: update_enabled())
+        browse_button.clicked.connect(choose_file)
+        reset_button.clicked.connect(reset_default)
+        validate_button.clicked.connect(validate_current)
+        save_button.clicked.connect(save_current)
+        cancel_button.clicked.connect(dialog.reject)
+
+        update_enabled()
+        validate_current()
+        dialog.exec()
+
     def _show_about(self) -> None:
+        xray = self._current_xray_resolution(refresh=True)
         text = (
             "<b>v2link-client</b><br>"
             f"Version: v{__version__}<br>"
+            f"Xray-core: {self._xray_status_summary(xray)}<br>"
             f"Author: {__author__}<br><br>"
             f"Repository: {PROJECT_REPOSITORY_URL}<br><br>"
             "Linux desktop client for V2Ray-style links powered by Xray-core.<br><br>"
@@ -525,6 +679,7 @@ class MainWindow(QMainWindow):
             fingerprint=connection_fingerprint(raw_link),
             xray=xray,
         )
+        self._last_xray_resolution = xray
 
         hint = (
             f"Validated: {parsed_link.display_name()}. "
@@ -582,6 +737,8 @@ class MainWindow(QMainWindow):
             self._process = XrayProcessManager()
         else:
             self._process = XrayProcessManager(xray)
+            if isinstance(xray, XrayBinary):
+                self._last_xray_resolution = xray
         self._validated_config_path = config_path
         self._validated_link = parsed_link
         self._validated_profile_id = profile_id
@@ -1166,6 +1323,7 @@ class MainWindow(QMainWindow):
             self.manage_profiles_button,
             self.profile_selector,
             self.check_updates_button,
+            self.xray_settings_button,
             self.about_button,
         ):
             self._refresh_style(widget)
@@ -1382,6 +1540,8 @@ class MainWindow(QMainWindow):
         http_ok, socks_ok = self._listener_reachability()
         audit = self._last_proxy_audit
         now = time.monotonic()
+        xray_resolution = self._current_xray_resolution(refresh=False)
+        xray_assets = xray_asset_status(xray_resolution)
 
         desired = self._proxy_status_to_dict(audit.desired if audit is not None else None)
         actual = self._proxy_status_to_dict(audit.actual if audit is not None else None)
@@ -1416,7 +1576,17 @@ class MainWindow(QMainWindow):
             },
             "xray": {
                 "running": bool(self._process.is_running()),
+                "status": "found" if xray_resolution.valid else "missing",
+                "source": xray_resolution.source,
                 "binary_path": self._process.binary_path,
+                "resolved_path": xray_resolution.path,
+                "version": xray_resolution.version,
+                "valid": xray_resolution.valid,
+                "error": xray_resolution.error,
+                "bundled_missing_in_packaged_build": (
+                    detect_runtime_kind() in {"appimage", "deb"} and xray_resolution.source != "bundled"
+                ),
+                **xray_assets,
                 "stats_api_configured": self._api_port is not None,
                 "stats_api_server": self._traffic_api_server(),
                 "last_stats_query_result": self._last_stats_query_result,

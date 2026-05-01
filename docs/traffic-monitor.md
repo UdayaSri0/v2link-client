@@ -58,11 +58,11 @@ $XDG_CONFIG_HOME/v2link-client/traffic_settings.json
 
 ## Proxy Tracking vs App Tracking
 
-Proxy/profile tracking uses Xray's Stats API. It measures traffic that flows through the active proxy/profile and can run entirely inside the normal unprivileged GUI.
+Proxy/profile tracking uses Xray's Stats API. It measures traffic that flows through the active proxy/profile and can run entirely inside the normal unprivileged GUI. The bundled Xray-core included in official AppImage, `.deb`, and APT builds is enough for this proxy/profile tracking; users do not need to install a separate system Xray package for normal use.
 
 The app queries Xray counters without `-reset`, computes safe deltas locally, and treats counter decreases as resets with a zero delta. Xray restarts create separate sessions.
 
-True per-application tracking on Linux requires process/executable attribution. That work belongs in a separate optional helper service:
+True per-application tracking on Linux still requires process/executable attribution. That work belongs in a separate optional helper service:
 
 ```text
 v2link-netmon
@@ -74,7 +74,7 @@ The helper communicates with the GUI over a read-only Unix domain socket:
 /run/v2link-client/netmon.sock
 ```
 
-The GUI never runs as root. Debian packages install a systemd service but do not enable it automatically.
+The GUI never runs as root. Debian packages install a systemd service but do not enable it automatically. AppImage builds do not install or enable a systemd service, so they will show the helper as not installed/enabled while proxy/profile tracking continues to work through bundled Xray.
 
 Enable the helper:
 
@@ -119,4 +119,4 @@ It is not hidden, because Xray really performs the encrypted remote connection w
 - **No proxy/profile traffic:** start Xray from the GUI and check Diagnostics for the Xray stats API server and last query result.
 - **Applications tab unavailable:** the optional helper is not installed, not enabled, or not reachable at `/run/v2link-client/netmon.sock`.
 - **Permission/capability warning:** the helper may not have enough privilege or kernel support for eBPF accounting. The GUI remains safe and unprivileged.
-- **AppImage:** AppImage builds do not bundle or enable the privileged helper; install the Debian package or a future helper package to use per-app tracking.
+- **AppImage:** AppImage builds include bundled Xray for proxy/profile stats, but they do not install or enable the privileged helper; install the Debian/APT package to use per-app tracking.

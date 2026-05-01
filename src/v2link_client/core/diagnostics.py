@@ -150,9 +150,37 @@ def _append_runtime_state(lines: list[str], state: Any) -> None:
             lines.append(f"- Last proxy audit error: {last_audit_error}")
 
     if isinstance(xray, dict):
+        status = str(xray.get("status") or ("found" if xray.get("valid") else "missing"))
+        source = str(xray.get("source") or "unknown")
+        source_label = {
+            "user-configured": "user configured",
+            "bundled": "bundled",
+            "system-path": "system PATH",
+        }.get(source, source)
+        lines.append(f"- Xray status: {status}")
+        lines.append(f"- Xray source: {source_label}")
         lines.append(f"- Xray running: {'yes' if bool(xray.get('running')) else 'no'}")
-        if xray.get("binary_path"):
-            lines.append(f"- Xray binary path: {xray.get('binary_path')}")
+        resolved_path = xray.get("resolved_path") or xray.get("binary_path")
+        if resolved_path:
+            lines.append(f"- Xray path: {resolved_path}")
+        if xray.get("version"):
+            lines.append(f"- Xray version: {xray.get('version')}")
+        if xray.get("error"):
+            lines.append(f"- Xray error: {xray.get('error')}")
+        geoip_found = bool(xray.get("geoip_found"))
+        geosite_found = bool(xray.get("geosite_found"))
+        lines.append(
+            f"- Geo files found: geoip.dat={'yes' if geoip_found else 'no'} "
+            f"geosite.dat={'yes' if geosite_found else 'no'}"
+        )
+        if xray.get("geoip_path"):
+            lines.append(f"- geoip.dat path: {xray.get('geoip_path')}")
+        if xray.get("geosite_path"):
+            lines.append(f"- geosite.dat path: {xray.get('geosite_path')}")
+        if bool(xray.get("bundled_incomplete")) or bool(xray.get("bundled_missing_in_packaged_build")):
+            lines.append("- Warning: Bundled Xray is missing. This build is incomplete.")
+        if source == "system-path" and status == "found":
+            lines.append("- Note: Using system Xray from PATH.")
         lines.append(
             f"- Xray stats API configured: "
             f"{'yes' if bool(xray.get('stats_api_configured')) else 'no'}"

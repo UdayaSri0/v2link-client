@@ -8,7 +8,6 @@ The UI intentionally keeps policy decisions simple:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import errno
 import logging
 from pathlib import Path
@@ -23,25 +22,27 @@ from v2link_client.core.errors import (
     PortInUseError,
 )
 from v2link_client.core.storage import get_logs_dir
-from v2link_client.core.system_subprocess import build_host_subprocess_env, system_which
+from v2link_client.core.system_subprocess import build_host_subprocess_env
+from v2link_client.core.xray_locator import (
+    MISSING_XRAY_MESSAGE,
+    XrayBinary,
+    find_xray_binary as locate_xray_binary,
+)
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True, slots=True)
-class CoreBinary:
-    name: str
-    path: str
+CoreBinary = XrayBinary
 
 
 def find_xray_binary() -> CoreBinary:
-    path = system_which("xray")
-    if not path:
+    xray = locate_xray_binary()
+    if not xray.valid or not xray.path:
         raise BinaryMissingError(
-            "xray not found in PATH",
-            user_message="Xray-core binary not found. Install `xray` or add it to PATH.",
+            xray.error or MISSING_XRAY_MESSAGE,
+            user_message=xray.error or MISSING_XRAY_MESSAGE,
         )
-    return CoreBinary(name="xray", path=path)
+    return xray
 
 
 def ensure_port_available(host: str, port: int) -> None:
@@ -70,6 +71,11 @@ def find_free_port(host: str) -> int:
 
 
 def validate_xray_config(xray: CoreBinary, config_path: Path, *, timeout_s: float = 5) -> None:
+    if not xray.path:
+        raise BinaryMissingError(
+            xray.error or MISSING_XRAY_MESSAGE,
+            user_message=xray.error or MISSING_XRAY_MESSAGE,
+        )
     cmd = [xray.path, "run", "-test", "-c", str(config_path)]
     env, env_info = build_host_subprocess_env()
     logger.info(
@@ -150,6 +156,11 @@ class XrayProcessManager:
             return
 
         xray = self._ensure_binary()
+        if not xray.path:
+            raise BinaryMissingError(
+                xray.error or MISSING_XRAY_MESSAGE,
+                user_message=xray.error or MISSING_XRAY_MESSAGE,
+            )
         logs_dir = get_logs_dir()
         logs_dir.mkdir(parents=True, exist_ok=True)
         self._stdout_path = logs_dir / "xray_stdout.log"

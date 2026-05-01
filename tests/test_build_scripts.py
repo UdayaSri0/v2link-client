@@ -1,0 +1,36 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_fetch_xray_script_pins_official_release_and_sha() -> None:
+    script = (ROOT / "scripts" / "fetch_xray_core.sh").read_text(encoding="utf-8")
+    assert "https://github.com/XTLS/Xray-core/releases/download" in script
+    assert "XRAY_VERSION=\"v26.3.27\"" in script
+    assert "XRAY_SHA256_X86_64=\"23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae\"" in script
+    assert "XRAY_SHA256_AARCH64=\"4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c\"" in script
+    assert "sha256sum -c -" in script
+
+
+def test_build_scripts_contain_xray_copy_checks() -> None:
+    appimage = (ROOT / "scripts" / "build_appimage.sh").read_text(encoding="utf-8")
+    deb = (ROOT / "scripts" / "build_deb.sh").read_text(encoding="utf-8")
+    release = (ROOT / "scripts" / "build_release.sh").read_text(encoding="utf-8")
+
+    assert "scripts/fetch_xray_core.sh" in appimage
+    assert "APPDIR}/usr/bin/xray/xray" in appimage
+    assert "V2LINK_BUNDLED_XRAY_DIR" in appimage
+    assert "XRAY_LOCATION_ASSET" in appimage
+
+    assert "scripts/fetch_xray_core.sh" in deb
+    assert "OPT_DIR}/xray/xray" in deb
+    assert "geoip.dat" in deb
+    assert "geosite.dat" in deb
+
+    assert "scripts/fetch_xray_core.sh" in release
+    assert "build_netmon.sh" in release
+    assert "AppImage layout missing bundled Xray" in release
+    assert ".deb layout missing bundled Xray" in release
