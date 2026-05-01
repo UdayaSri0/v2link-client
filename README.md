@@ -24,6 +24,7 @@ Project status: **beta** (stable for daily use, focused feature scope).
 - Local SOCKS5 + HTTP proxy endpoints (auto-select free ports when needed)
 - Optional desktop system-proxy apply/restore while running
 - Health indicator + ping + speed test + traffic/uptime metrics
+- Traffic Monitor with local proxy/profile usage history, daily totals, simple charts, and advanced optional per-app tracking readiness
 - Diagnostics panel with runtime proxy state and log access
 - Built-in update check against GitHub Releases
 - Light/Dark theme
@@ -207,6 +208,38 @@ GitHub secrets:
 2. Click **Validate & Save**.
 3. Click **Start**.
 4. Enable **System Proxy** for desktop-wide proxying, or use **Copy manual proxy settings**.
+
+## Traffic Monitor
+
+The Traffic Monitor records proxy traffic from Xray's Stats API while the core is running. It shows:
+
+- Today upload/download totals
+- Current session upload/download and live speed
+- Per saved-profile upload/download totals
+- Daily history with 7-day and 30-day views
+- Advanced **Applications** tab for future per-application tracking
+- Settings for retention, CSV export, and clearing local traffic history
+- Diagnostics for the stats API, helper readiness, and local traffic database
+
+Traffic history is stored locally only in SQLite:
+
+```text
+$XDG_DATA_HOME/v2link-client/traffic.sqlite3
+```
+
+If `XDG_DATA_HOME` is not set, the app uses the platform default data directory through `platformdirs`, usually `~/.local/share/v2link-client/traffic.sqlite3` on Linux.
+
+Settings are stored at:
+
+```text
+$XDG_CONFIG_HOME/v2link-client/traffic_settings.json
+```
+
+Proxy/profile tracking works in the normal GUI with no root permission because Xray provides proxy counters through its Stats API.
+
+Per-application tracking is different. True Linux app attribution needs an optional privileged helper service, planned as `v2link-netmon`, because process/executable attribution must happen outside the unprivileged GUI. The GUI never runs as root. Until that helper exists and is enabled, the Applications tab clearly reports that app tracking is advanced/optional/unavailable, while proxy/profile tracking remains active.
+
+Privacy note: traffic history never leaves your machine. Application traffic tracking records local process names, executable paths, and byte counters. It does not decrypt content, inspect messages, or upload data anywhere. Phase 1 does not provide perfect per-application attribution, so traffic from browsers, VS Code, Transmission, and other apps may appear together under the active proxy profile.
 
 ## Supported Link Scope
 

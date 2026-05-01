@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import asdict
 from pathlib import Path
 import socket
 import tempfile
@@ -21,6 +22,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -38,6 +40,7 @@ from v2link_client.core.errors import AppError
 from v2link_client.core.health_check import ProxyHealthResult, check_http_proxy
 from v2link_client.core.humanize import format_bytes, format_duration_s, format_mbps
 from v2link_client.core.link_parser import parse_link
+from v2link_client.core.netmon_client import NetmonClient
 from v2link_client.core.net_probe import ServerPingResult, ping_server
 from v2link_client.core.profile_store import (
     Profile,
@@ -58,11 +61,14 @@ from v2link_client.core.process_manager import (
 )
 from v2link_client.core.speed_test import SpeedTestResult, run_speed_test_via_http_proxy
 from v2link_client.core.storage import get_config_dir, get_state_dir, load_json, save_json
+from v2link_client.core.traffic_settings import TrafficSettings, load_traffic_settings
+from v2link_client.core.traffic_store import ProxyTrafficSample, TrafficStore
 from v2link_client.core.update_check import UpdateCheckResult, check_for_updates
 from v2link_client.core.xray_api import TrafficStats, get_outbound_traffic
 from v2link_client.ui.diagnostics_widget import DiagnosticsWidget
 from v2link_client.ui.profile_dialogs import ProfileEditorDialog, ProfileManagerDialog
 from v2link_client.ui.theme import ThemeName, apply_theme, normalize_theme, theme_display_name
+from v2link_client.ui.traffic_monitor_widget import TrafficMonitorWidget
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +229,35 @@ class MainWindow(QMainWindow):
         help_row.addWidget(self.about_button)
 
         self.diagnostics_widget = DiagnosticsWidget()
+        self._traffic_settings: TrafficSettings = load_traffic_settings()
+        self._netmon_client = NetmonClient(provider=self._traffic_settings.netmon_provider)
+        if self._traffic_settings.app_tracking_enabled:
+            self._netmon_client.start_tracking()
+        self._last_traffic_store_error: str | None = None
+        try:
+            self._traffic_store: TrafficStore | None = TrafficStore()
+        except Exception as exc:  # pragma: no cover - defensive startup guard
+            logger.exception("Failed to initialize traffic store")
+            self._traffic_store = None
+            self._last_traffic_store_error = str(exc)
+        self.traffic_monitor_widget = TrafficMonitorWidget(
+            self._traffic_store,
+            settings=self._traffic_settings,
+            netmon_client=self._netmon_client,
+        )
+        self.traffic_monitor_widget.settings_changed.connect(self._on_traffic_settings_changed)
+        if self._last_traffic_store_error:
+            self.traffic_monitor_widget.set_diagnostics(
+                api_server=None,
+                stats_available=False,
+                last_sample_time=None,
+                warning=None,
+                store_error=self._last_traffic_store_error,
+            )
+
+        self.runtime_tabs = QTabWidget()
+        self.runtime_tabs.addTab(self.traffic_monitor_widget, "Traffic Monitor")
+        self.runtime_tabs.addTab(self.diagnostics_widget, "Diagnostics")
 
         layout = QVBoxLayout()
         layout.setContentsMargins(16, 16, 16, 16)
@@ -232,7 +267,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(control_row)
         layout.addLayout(metrics_row)
         layout.addLayout(help_row)
-        layout.addWidget(self.diagnostics_widget, 1)
+        layout.addWidget(self.runtime_tabs, 1)
 
         central.setLayout(layout)
 
@@ -292,6 +327,10 @@ class MainWindow(QMainWindow):
         self._last_stats_at: float | None = None
         self._last_uplink: int | None = None
         self._last_downlink: int | None = None
+        self._last_stats_query_result: str | None = None
+        self._stats_available = False
+        self._traffic_session_id: str | None = None
+        self._last_traffic_sample: ProxyTrafficSample | None = None
         self._last_traffic_activity_at: float | None = None
         self._ping_in_flight = False
         self._speed_test_in_flight = False
@@ -516,6 +555,8 @@ class MainWindow(QMainWindow):
         self._last_stats_at = None
         self._last_uplink = None
         self._last_downlink = None
+        self._last_stats_query_result = None
+        self._stats_available = False
         self._last_traffic_activity_at = None
         self._last_health_result = None
         self._set_metrics_defaults()
@@ -807,7 +848,10 @@ class MainWindow(QMainWindow):
         self._last_stats_at = None
         self._last_uplink = None
         self._last_downlink = None
+        self._last_stats_query_result = None
+        self._stats_available = False
         self._last_traffic_activity_at = None
+        self._start_traffic_session()
         self._health_token += 1
         self._last_health_ok = None
         self._last_health_result = None
@@ -861,6 +905,7 @@ class MainWindow(QMainWindow):
         self._stats_token += 1
         self._set_health_state("offline", "Not running")
         proxy_note = self._restore_system_proxy()
+        self._end_traffic_session(final_stats=self._last_known_stats())
         self._core_started_at = None
         self._last_traffic_activity_at = None
         self._set_metrics_defaults()
@@ -880,6 +925,7 @@ class MainWindow(QMainWindow):
         self._proxy_audit_timer.stop()
         self._health_token += 1
         self._stats_token += 1
+        final_stats = self._last_known_stats()
         try:
             self._process.stop()
         except Exception:  # pragma: no cover - defensive
@@ -899,6 +945,7 @@ class MainWindow(QMainWindow):
         self._set_health_state("offline", "Not running")
         self._last_health_result = None
         proxy_note = self._restore_system_proxy()
+        self._end_traffic_session(final_stats=final_stats)
         self._core_started_at = None
         self._last_traffic_activity_at = None
         self._set_metrics_defaults()
@@ -1168,6 +1215,129 @@ class MainWindow(QMainWindow):
         self.uptime_label.setText("UPTIME (00:00:00)")
         self.speed_label.setText("SPEED (↑ 0.0 Mbps / ↓ 0.0 Mbps)")
         self.traffic_label.setText("TRAFFIC (↑ 0 B / ↓ 0 B)")
+        if hasattr(self, "traffic_monitor_widget"):
+            self.traffic_monitor_widget.update_live_sample(None)
+
+    def _last_known_stats(self) -> TrafficStats | None:
+        if self._last_uplink is None or self._last_downlink is None:
+            return None
+        return TrafficStats(
+            uplink_bytes=int(self._last_uplink),
+            downlink_bytes=int(self._last_downlink),
+        )
+
+    def _active_traffic_profile(self) -> tuple[str | None, str, str | None]:
+        current_url = self.link_input.text().strip()
+        profile = None
+        if self._validated_profile_id:
+            candidate = self._profile_store.get_by_id(self._validated_profile_id)
+            if candidate is not None and candidate.url.strip() == current_url:
+                profile = candidate
+        if profile is None:
+            profile = self._profile_for_current_link()
+        if profile is None:
+            return None, "Unsaved profile", self._validated_fingerprint or connection_fingerprint(current_url)
+        return profile.id, profile.name, self._validated_fingerprint or connection_fingerprint(profile.url)
+
+    def _traffic_api_server(self) -> str | None:
+        if self._api_port is None:
+            return None
+        return f"{DEFAULT_LISTEN}:{self._api_port}"
+
+    def _start_traffic_session(self) -> None:
+        self._traffic_session_id = None
+        self._last_traffic_sample = None
+        self.traffic_monitor_widget.set_current_session(None)
+        if not self._traffic_settings.proxy_history_enabled:
+            self._refresh_traffic_monitor()
+            return
+        if self._traffic_store is None:
+            self._last_traffic_store_error = self._last_traffic_store_error or "Traffic store unavailable."
+            self._refresh_traffic_monitor()
+            return
+
+        profile_id, profile_name, fingerprint = self._active_traffic_profile()
+        try:
+            self._traffic_session_id = self._traffic_store.start_proxy_session(
+                profile_id=profile_id,
+                profile_name=profile_name,
+                connection_fingerprint=fingerprint,
+                initial_stats=TrafficStats(uplink_bytes=0, downlink_bytes=0),
+                api_server=self._traffic_api_server(),
+                socks_port=int(self._socks_port),
+                http_port=int(self._http_port),
+            )
+            self._last_traffic_store_error = None
+            self.traffic_monitor_widget.set_current_session(self._traffic_session_id)
+        except Exception as exc:  # pragma: no cover - defensive persistence guard
+            logger.exception("Failed to start traffic session")
+            self._last_traffic_store_error = str(exc)
+        self._refresh_traffic_monitor()
+
+    def _record_traffic_sample(self, stats: TrafficStats) -> ProxyTrafficSample | None:
+        if not self._traffic_settings.proxy_history_enabled:
+            self._refresh_traffic_monitor()
+            return None
+        if self._traffic_store is None or self._traffic_session_id is None:
+            self._refresh_traffic_monitor()
+            return None
+        try:
+            sample = self._traffic_store.record_proxy_sample(self._traffic_session_id, stats)
+        except Exception as exc:  # pragma: no cover - defensive persistence guard
+            logger.exception("Failed to record traffic sample")
+            self._last_traffic_store_error = str(exc)
+            self._refresh_traffic_monitor()
+            return None
+
+        self._last_traffic_store_error = None
+        self._last_traffic_sample = sample
+        self.traffic_monitor_widget.update_live_sample(sample)
+        self._refresh_traffic_monitor()
+        return sample
+
+    def _end_traffic_session(self, *, final_stats: TrafficStats | None = None) -> None:
+        if self._traffic_store is not None and self._traffic_session_id is not None:
+            try:
+                self._traffic_store.end_proxy_session(self._traffic_session_id, final_stats=final_stats)
+                self._last_traffic_store_error = None
+            except Exception as exc:  # pragma: no cover - defensive persistence guard
+                logger.exception("Failed to end traffic session")
+                self._last_traffic_store_error = str(exc)
+        self._traffic_session_id = None
+        self._last_traffic_sample = None
+        self.traffic_monitor_widget.set_current_session(None)
+        self._refresh_traffic_monitor()
+
+    def _refresh_traffic_monitor(self) -> None:
+        if not hasattr(self, "traffic_monitor_widget"):
+            return
+        warning = None
+        if self._last_traffic_sample is not None and self._last_traffic_sample.warning:
+            warning = self._last_traffic_sample.warning
+        elif not self._stats_available:
+            warning = self._last_stats_query_result
+        self.traffic_monitor_widget.set_diagnostics(
+            api_server=self._traffic_api_server(),
+            stats_available=self._stats_available,
+            last_sample_time=(
+                self._last_traffic_sample.timestamp if self._last_traffic_sample is not None else None
+            ),
+            warning=warning,
+            store_error=self._last_traffic_store_error,
+        )
+        self.traffic_monitor_widget.refresh()
+
+    def _on_traffic_settings_changed(self, settings: object) -> None:
+        if not isinstance(settings, TrafficSettings):
+            return
+        self._traffic_settings = settings
+        self._netmon_client = NetmonClient(provider=settings.netmon_provider)
+        if settings.app_tracking_enabled:
+            self._netmon_client.start_tracking()
+        else:
+            self._netmon_client.stop_tracking()
+        self.traffic_monitor_widget.set_netmon_client(self._netmon_client)
+        self._update_diagnostics_runtime_state()
 
     def _tcp_reachable(self, host: str, port: int, *, timeout_s: float = 0.25) -> bool:
         try:
@@ -1241,6 +1411,9 @@ class MainWindow(QMainWindow):
             "xray": {
                 "running": bool(self._process.is_running()),
                 "binary_path": self._process.binary_path,
+                "stats_api_configured": self._api_port is not None,
+                "stats_api_server": self._traffic_api_server(),
+                "last_stats_query_result": self._last_stats_query_result,
                 "health_state": self._health_state,
                 "health_detail": self._health_detail,
                 "health_checked_url": (
@@ -1258,6 +1431,26 @@ class MainWindow(QMainWindow):
                 "http_listener_reachable": http_ok,
                 "socks_listener_reachable": socks_ok,
                 "recent_traffic_flowing": self._recent_traffic_flowing(now=now),
+            },
+            "traffic": {
+                "db_path": str(self._traffic_store.db_path) if self._traffic_store is not None else None,
+                "current_session_id": self._traffic_session_id,
+                "last_sample_time": (
+                    self._last_traffic_sample.timestamp
+                    if self._last_traffic_sample is not None
+                    else None
+                ),
+                "last_store_error": self._last_traffic_store_error,
+                "proxy_history_enabled": bool(self._traffic_settings.proxy_history_enabled),
+                "app_tracking_enabled": bool(self._traffic_settings.app_tracking_enabled),
+                "detailed_retention_days": int(self._traffic_settings.detailed_retention_days),
+                "daily_retention_days": int(self._traffic_settings.daily_retention_days),
+                "app_tables_present": (
+                    self._traffic_store.app_tables_present()
+                    if self._traffic_store is not None
+                    else False
+                ),
+                "netmon": asdict(self._netmon_client.get_status()),
             },
         }
         self.diagnostics_widget.set_runtime_state(state)
@@ -1366,6 +1559,12 @@ class MainWindow(QMainWindow):
         if not isinstance(stats, TrafficStats):  # pragma: no cover - defensive
             return
 
+        self._stats_available = True
+        self._last_stats_query_result = (
+            f"ok: uplink={stats.uplink_bytes} downlink={stats.downlink_bytes}"
+        )
+        traffic_sample = self._record_traffic_sample(stats)
+
         self.traffic_label.setText(
             f"TRAFFIC (↑ {format_bytes(stats.uplink_bytes)} / ↓ {format_bytes(stats.downlink_bytes)})"
         )
@@ -1379,6 +1578,9 @@ class MainWindow(QMainWindow):
             down_delta = int(stats.downlink_bytes - self._last_downlink)
             up_bps = up_delta / dt
             down_bps = down_delta / dt
+            if traffic_sample is not None:
+                up_bps = traffic_sample.upload_bps
+                down_bps = traffic_sample.download_bps
             self.speed_label.setText(
                 f"SPEED (↑ {format_mbps(up_bps)} / ↓ {format_mbps(down_bps)})"
             )
@@ -1397,6 +1599,9 @@ class MainWindow(QMainWindow):
             return
         # Keep the UI stable; stats may be unavailable if API isn't ready yet.
         logger.info("Stats poll failed: %s", message)
+        self._stats_available = False
+        self._last_stats_query_result = message
+        self._refresh_traffic_monitor()
         self._update_diagnostics_runtime_state()
 
     def _on_ping_clicked(self) -> None:

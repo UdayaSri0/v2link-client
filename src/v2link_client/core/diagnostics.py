@@ -6,12 +6,14 @@ from dataclasses import dataclass
 import os
 import platform
 import shlex
+import sqlite3
 import subprocess
 import sys
 from typing import Any
 
 from v2link_client.core.proxy_manager import SNAPSHOT_FILE, get_backend_warning_history
 from v2link_client.core.storage import get_logs_dir, get_state_dir
+from v2link_client.core.traffic_store import get_traffic_db_path
 from v2link_client.core.system_subprocess import (
     build_host_subprocess_env,
     get_host_subprocess_env_info,
@@ -110,7 +112,8 @@ def _append_runtime_state(lines: list[str], state: Any) -> None:
 
     system_proxy = state.get("system_proxy")
     xray = state.get("xray")
-    if not isinstance(system_proxy, dict) and not isinstance(xray, dict):
+    traffic = state.get("traffic")
+    if not isinstance(system_proxy, dict) and not isinstance(xray, dict) and not isinstance(traffic, dict):
         return
 
     lines.append("Runtime Proxy State")
@@ -151,6 +154,14 @@ def _append_runtime_state(lines: list[str], state: Any) -> None:
         if xray.get("binary_path"):
             lines.append(f"- Xray binary path: {xray.get('binary_path')}")
         lines.append(
+            f"- Xray stats API configured: "
+            f"{'yes' if bool(xray.get('stats_api_configured')) else 'no'}"
+        )
+        if xray.get("stats_api_server"):
+            lines.append(f"- Xray stats API server: {xray.get('stats_api_server')}")
+        if xray.get("last_stats_query_result"):
+            lines.append(f"- Last stats query result: {xray.get('last_stats_query_result')}")
+        lines.append(
             f"- Xray proxy listeners reachable: "
             f"http={str(bool(xray.get('http_listener_reachable'))).lower()} "
             f"socks={str(bool(xray.get('socks_listener_reachable'))).lower()}"
@@ -183,7 +194,69 @@ def _append_runtime_state(lines: list[str], state: Any) -> None:
                 "need app-specific proxy settings."
             )
 
+    if isinstance(traffic, dict):
+        lines.append("")
+        lines.append("Traffic Monitor")
+        lines.append(
+            f"- Proxy/profile history tracking: "
+            f"{'enabled' if bool(traffic.get('proxy_history_enabled')) else 'disabled'}"
+        )
+        lines.append(
+            f"- App tracking setting: "
+            f"{'enabled' if bool(traffic.get('app_tracking_enabled')) else 'disabled'}"
+        )
+        lines.append(f"- Detailed sample retention: {traffic.get('detailed_retention_days') or 'n/a'} days")
+        lines.append(f"- Daily total retention: {traffic.get('daily_retention_days') or 'n/a'} days")
+        lines.append(f"- Current proxy session ID: {traffic.get('current_session_id') or 'none'}")
+        lines.append(f"- Last traffic sample time: {traffic.get('last_sample_time') or 'none'}")
+        lines.append(f"- Last traffic store error: {traffic.get('last_store_error') or 'none'}")
+        lines.append(
+            f"- DB app tables present: "
+            f"{'yes' if bool(traffic.get('app_tables_present')) else 'no'}"
+        )
+        netmon = traffic.get("netmon")
+        if isinstance(netmon, dict):
+            lines.append(
+                "- App helper: "
+                f"provider={netmon.get('provider') or 'unknown'} "
+                f"installed={'yes' if bool(netmon.get('installed')) else 'no'} "
+                f"running={'yes' if bool(netmon.get('running')) else 'no'}"
+            )
+            lines.append(f"- App helper socket/API: {netmon.get('api_url') or netmon.get('socket_path') or 'n/a'}")
+            lines.append(
+                f"- App helper permission: "
+                f"{'ok' if bool(netmon.get('permission_ok')) else 'not available'}"
+            )
+            lines.append(f"- App helper last response: {netmon.get('last_response') or 'none'}")
+            lines.append(f"- Kernel support: {netmon.get('kernel_support') or 'unknown/not checked yet'}")
+
     lines.append("")
+
+
+def _append_traffic_storage(lines: list[str]) -> None:
+    db_path = get_traffic_db_path()
+    parent = db_path.parent
+    lines.append(f"- Traffic DB: {db_path}")
+    lines.append(f"- Traffic DB exists: {'yes' if db_path.exists() else 'no'}")
+    lines.append(f"- Traffic DB parent exists: {'yes' if parent.exists() else 'no'}")
+    lines.append(f"- Traffic DB readable: {'yes' if db_path.exists() and os.access(db_path, os.R_OK) else 'no'}")
+    writable = os.access(db_path, os.W_OK) if db_path.exists() else os.access(parent, os.W_OK)
+    lines.append(f"- Traffic DB writable: {'yes' if writable else 'no'}")
+    lines.append(f"- Traffic DB app tables present: {'yes' if _db_app_tables_present(db_path) else 'no'}")
+
+
+def _db_app_tables_present(db_path) -> bool:  # noqa: ANN001
+    if not db_path.exists():
+        return False
+    try:
+        with sqlite3.connect(db_path) as conn:
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+    except sqlite3.Error:
+        return False
+    required = {"apps", "app_traffic_samples", "daily_app_usage", "app_tracking_events"}
+    return required.issubset({str(row[0]) for row in rows})
 
 
 def collect_diagnostics(state: Any | None = None) -> str:
@@ -226,6 +299,7 @@ def collect_diagnostics(state: Any | None = None) -> str:
     lines.append(
         f"- System proxy snapshot: {'present' if snapshot_path.exists() else 'absent'} ({snapshot_path})"
     )
+    _append_traffic_storage(lines)
     lines.append("")
 
     lines.append("Proxy Backend Warnings")
