@@ -9,8 +9,9 @@ from typing import Any
 from v2link_client.core.storage import get_config_dir, load_json, save_json
 
 TRAFFIC_SETTINGS_FILE = "traffic_settings.json"
-RETENTION_OPTIONS = {7, 30, 90}
+RETENTION_OPTIONS = {0, 7, 30, 90}
 DEFAULT_DAILY_RETENTION_DAYS = 365
+DAILY_RETENTION_OPTIONS = {0, 365}
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +39,8 @@ def load_traffic_settings(path: Path | None = None) -> TrafficSettings:
         payload.get("daily_retention_days"),
         DEFAULT_DAILY_RETENTION_DAYS,
     )
+    if daily_retention_days not in DAILY_RETENTION_OPTIONS:
+        daily_retention_days = DEFAULT_DAILY_RETENTION_DAYS
     provider = str(payload.get("netmon_provider", "socket") or "socket").strip().lower()
     if provider not in {"disabled", "mock", "socket"}:
         provider = "socket"
@@ -58,6 +61,8 @@ def save_traffic_settings(settings: TrafficSettings, path: Path | None = None) -
 
 
 def _retention_value(value: Any) -> int:
+    if value in {0, "0", "forever", "Forever"}:
+        return 0
     parsed = _positive_int(value, 30)
     if parsed in RETENTION_OPTIONS:
         return parsed

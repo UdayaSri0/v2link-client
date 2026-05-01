@@ -31,7 +31,9 @@ Optional privileged system service
 - Current session upload and download
 - Per saved-profile upload and download totals
 - Daily totals
-- 7-day and 30-day history summaries
+- Daily history for Today, Last 7 days, Last 30 days, This month, and custom date ranges
+- Individual proxy sessions for a selected date
+- Per-session samples for speed and cumulative usage charts
 - Readiness state for future per-application tracking
 
 ## Storage
@@ -61,6 +63,40 @@ $XDG_CONFIG_HOME/v2link-client/traffic_settings.json
 Proxy/profile tracking uses Xray's Stats API. It measures traffic that flows through the active proxy/profile and can run entirely inside the normal unprivileged GUI. The bundled Xray-core included in official AppImage, `.deb`, and APT builds is enough for this proxy/profile tracking; users do not need to install a separate system Xray package for normal use.
 
 The app queries Xray counters without `-reset`, computes safe deltas locally, and treats counter decreases as resets with a zero delta. Xray restarts create separate sessions.
+
+## Daily History vs Session History
+
+Daily history aggregates all proxy/profile traffic samples by date. It is useful for totals, trends, and comparing days.
+
+Session history groups traffic by each Start/Stop run. For example, if v2link-client starts at 20:00 and stops at 20:30, the History tab shows one session for that date with:
+
+- Start time
+- End time
+- Duration
+- Profile name
+- Download
+- Upload
+- Total
+- Average speed
+- Status
+
+Selecting a date loads all sessions that started on that date. Selecting a session shows details such as peak speed, API server, SOCKS/HTTP ports, and a chart of samples from that session.
+
+Unfinished sessions are preserved. If the app is restarted after an unexpected stop, sessions without an end time are shown as `crashed` or `unknown` rather than being silently dropped.
+
+## CSV Export
+
+History export supports three CSV shapes:
+
+- Daily summary: `v2link-traffic-daily-YYYY-MM-DD_to_YYYY-MM-DD.csv`
+- Session summary: `v2link-traffic-sessions-YYYY-MM-DD_to_YYYY-MM-DD.csv`
+- Selected session samples: `v2link-traffic-session-SESSION_ID.csv`
+
+Daily summaries include date totals and session counts. Session summaries include start/end time, duration, profile, totals, average speeds, and status. Session sample exports include raw Xray counters, deltas, and calculated upload/download speeds.
+
+## Retention
+
+Detailed session samples can be kept for 7 days, 30 days, 90 days, or forever. Cleanup only removes old detailed sample rows. It does not delete session summaries, daily totals, or profile totals.
 
 True per-application tracking on Linux still requires process/executable attribution. That work belongs in a separate optional helper service:
 

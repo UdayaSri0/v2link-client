@@ -10,8 +10,8 @@ import socket
 import tempfile
 import time
 
-from PyQt6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QAction, QDesktopServices, QIcon
+from PyQt6.QtCore import QEvent, QObject, QRunnable, Qt, QThreadPool, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -93,6 +93,9 @@ HEALTH_INTERVAL_MS = 5000
 PROXY_AUDIT_INTERVAL_MS = 4000
 PROXY_AUDIT_MAX_BACKOFF_S = 30.0
 RECENT_TRAFFIC_WINDOW_S = 15.0
+WINDOW_GEOMETRY_KEY = "window_geometry_v1"
+WINDOW_MAXIMIZED_KEY = "window_maximized"
+TRAFFIC_MONITOR_LAYOUT_KEY = "traffic_monitor_layout_v1"
 
 
 class HealthCheckWorkerSignals(QObject):
@@ -119,7 +122,18 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(f"v2link-client v{__version__}")
-        self.resize(900, 640)
+        self.resize(1180, 760)
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            self.setMinimumSize(
+                min(1000, max(640, available.width() - 40)),
+                min(680, max(520, available.height() - 40)),
+            )
+        else:
+            self.setMinimumSize(1000, 680)
+        self._last_responsive_mode: str | None = None
+        self._layout_state_loaded = False
         icon_path = get_app_icon_path()
         if icon_path is not None:
             self.setWindowIcon(QIcon(str(icon_path)))
@@ -261,6 +275,10 @@ class MainWindow(QMainWindow):
             netmon_client=self._netmon_client,
         )
         self.traffic_monitor_widget.settings_changed.connect(self._on_traffic_settings_changed)
+        self._workspace_shortcut = QShortcut(QKeySequence("F11"), self)
+        self._workspace_shortcut.activated.connect(self.traffic_monitor_widget.toggle_workspace_mode)
+        self._escape_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        self._escape_shortcut.activated.connect(self.traffic_monitor_widget.exit_workspace_mode)
         if self._last_traffic_store_error:
             self.traffic_monitor_widget.set_diagnostics(
                 api_server=None,
@@ -286,6 +304,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.runtime_tabs, 1)
 
         central.setLayout(layout)
+        self._main_layout = layout
 
         self._process = XrayProcessManager()
         self._last_xray_resolution: XrayBinary = locate_xray_binary()
@@ -356,6 +375,7 @@ class MainWindow(QMainWindow):
 
         profile_data = self._load_profile()
         self._load_saved_profiles(profile_data)
+        self._restore_layout_state(profile_data)
         self.link_input.textChanged.connect(self._on_link_input_changed)
         self.profile_selector.currentIndexChanged.connect(self._on_profile_selected)
         self.system_proxy_checkbox.toggled.connect(self._on_system_proxy_toggled)
@@ -378,6 +398,15 @@ class MainWindow(QMainWindow):
         except Exception:
             logger.exception("Failed to auto-repair stale loopback proxy settings")
         self._update_diagnostics_runtime_state()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._apply_responsive_layout()
+
+    def changeEvent(self, event) -> None:  # type: ignore[override]
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            self._apply_responsive_layout()
 
     def _setup_menu(self) -> None:
         help_menu = self.menuBar().addMenu("&Help")
@@ -1338,7 +1367,94 @@ class MainWindow(QMainWindow):
         data[PROFILE_KEY_APPLY_SYSTEM_PROXY_EXPLICIT] = True
         if link is not None:
             data["link"] = link
+        data.update(self._current_layout_state())
         save_json(profile_path, data)
+
+    def _current_layout_state(self) -> dict[str, object]:
+        geometry = self.normalGeometry() if self.isMaximized() and self.normalGeometry().isValid() else self.geometry()
+        return {
+            WINDOW_GEOMETRY_KEY: {
+                "x": int(geometry.x()),
+                "y": int(geometry.y()),
+                "width": int(geometry.width()),
+                "height": int(geometry.height()),
+            },
+            WINDOW_MAXIMIZED_KEY: bool(self.isMaximized()),
+            TRAFFIC_MONITOR_LAYOUT_KEY: self.traffic_monitor_widget._save_layout_state()
+            if hasattr(self, "traffic_monitor_widget")
+            else {},
+        }
+
+    def _restore_layout_state(self, data: dict) -> None:
+        if not isinstance(data, dict):
+            self._apply_responsive_layout()
+            return
+        self._restore_window_geometry(data.get(WINDOW_GEOMETRY_KEY), bool(data.get(WINDOW_MAXIMIZED_KEY, False)))
+        traffic_state = data.get(TRAFFIC_MONITOR_LAYOUT_KEY)
+        if isinstance(traffic_state, dict) and hasattr(self, "traffic_monitor_widget"):
+            self.traffic_monitor_widget._restore_layout_state(traffic_state)
+        self._layout_state_loaded = True
+        self._apply_responsive_layout()
+
+    def _restore_window_geometry(self, geometry_state: object, maximized: bool) -> None:
+        screen = QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else None
+        safe_width = 1180
+        safe_height = 760
+        if available is not None:
+            safe_width = min(safe_width, max(640, available.width() - 40))
+            safe_height = min(safe_height, max(520, available.height() - 40))
+
+        restored = False
+        if isinstance(geometry_state, dict):
+            try:
+                width = max(640, int(geometry_state.get("width", safe_width)))
+                height = max(520, int(geometry_state.get("height", safe_height)))
+                x = int(geometry_state.get("x", 0))
+                y = int(geometry_state.get("y", 0))
+            except (TypeError, ValueError):
+                width, height, x, y = safe_width, safe_height, 0, 0
+
+            if available is not None:
+                width = min(width, available.width())
+                height = min(height, available.height())
+                x = min(max(x, available.left()), max(available.left(), available.right() - width + 1))
+                y = min(max(y, available.top()), max(available.top(), available.bottom() - height + 1))
+                restored = width <= available.width() and height <= available.height()
+            else:
+                restored = True
+            if restored:
+                self.setGeometry(x, y, width, height)
+
+        if not restored:
+            self.resize(safe_width, safe_height)
+
+        if maximized:
+            self.showMaximized()
+
+    def _is_compact_mode(self) -> bool:
+        return self.height() < 820 and not self._is_workspace_mode()
+
+    def _is_workspace_mode(self) -> bool:
+        return bool(self.isMaximized() or (self.width() >= 1350 and self.height() >= 860))
+
+    def _apply_responsive_layout(self) -> None:
+        mode = "workspace" if self._is_workspace_mode() else "compact" if self._is_compact_mode() else "normal"
+        if mode == self._last_responsive_mode:
+            if hasattr(self, "traffic_monitor_widget"):
+                self.traffic_monitor_widget._apply_responsive_layout()
+            return
+        self._last_responsive_mode = mode
+        compact = mode == "compact"
+        margins = 8 if compact else 12 if mode == "normal" else 14
+        spacing = 6 if compact else 10
+        if hasattr(self, "_main_layout"):
+            self._main_layout.setContentsMargins(margins, margins, margins, margins)
+            self._main_layout.setSpacing(spacing)
+        for row in self.findChildren(QPushButton):
+            row.setMinimumHeight(30 if compact else 32)
+        if hasattr(self, "traffic_monitor_widget"):
+            self.traffic_monitor_widget._apply_responsive_layout()
 
     def _refresh_style(self, widget) -> None:
         style = widget.style()
@@ -1968,6 +2084,7 @@ class MainWindow(QMainWindow):
             self.health_label.setStyleSheet("color: #c62828; font-weight: 600;")
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._save_profile_preferences()
         if self._process.is_running():
             self._stop_core(user_message="Stopped (app closed).")
         super().closeEvent(event)
