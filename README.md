@@ -239,6 +239,15 @@ Proxy/profile tracking works in the normal GUI with no root permission because X
 
 Per-application tracking is different. True Linux app attribution needs an optional privileged helper service, planned as `v2link-netmon`, because process/executable attribution must happen outside the unprivileged GUI. The GUI never runs as root. Until that helper exists and is enabled, the Applications tab clearly reports that app tracking is advanced/optional/unavailable, while proxy/profile tracking remains active.
 
+Debian packages install the optional helper and systemd service, but do not enable it automatically:
+
+```bash
+sudo systemctl enable --now v2link-netmon
+sudo systemctl disable --now v2link-netmon
+```
+
+The helper exposes read-only JSON stats over `/run/v2link-client/netmon.sock`. If the helper, permissions, or eBPF backend are unavailable, the GUI stays unprivileged and shows a clear unavailable/diagnostic state.
+
 Privacy note: traffic history never leaves your machine. Application traffic tracking records local process names, executable paths, and byte counters. It does not decrypt content, inspect messages, or upload data anywhere. Phase 1 does not provide perfect per-application attribution, so traffic from browsers, VS Code, Transmission, and other apps may appear together under the active proxy profile.
 
 ## Supported Link Scope

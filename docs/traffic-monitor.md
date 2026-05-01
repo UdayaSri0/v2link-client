@@ -2,7 +2,7 @@
 
 The Traffic Monitor records historical proxy usage from Xray's Stats API. It also includes the data model, UI, settings, diagnostics, and client API needed for future per-application tracking.
 
-Per-application tracking is marked **Advanced / Optional / Requires helper service**. The privileged helper itself is not implemented in this phase.
+Per-application tracking is marked **Advanced / Optional / Requires helper service**. The optional helper is `v2link-netmon`.
 
 ## What It Tracks
 
@@ -39,13 +39,33 @@ $XDG_CONFIG_HOME/v2link-client/traffic_settings.json
 
 Proxy/profile tracking uses Xray's Stats API. It measures traffic that flows through the active proxy/profile and can run entirely inside the normal unprivileged GUI.
 
-True per-application tracking on Linux requires process/executable attribution. That work belongs in a separate optional helper service, planned as:
+True per-application tracking on Linux requires process/executable attribution. That work belongs in a separate optional helper service:
 
 ```text
 v2link-netmon
 ```
 
-The helper is expected to communicate with the GUI over a Unix domain socket or localhost API. The GUI never runs as root.
+The helper communicates with the GUI over a read-only Unix domain socket:
+
+```text
+/run/v2link-client/netmon.sock
+```
+
+The GUI never runs as root. Debian packages install a systemd service but do not enable it automatically.
+
+Enable the helper:
+
+```bash
+sudo systemctl enable --now v2link-netmon
+```
+
+Disable the helper:
+
+```bash
+sudo systemctl disable --now v2link-netmon
+```
+
+The current helper includes the daemon API, SQLite storage, process identity resolver, systemd packaging, and an eBPF backend interface. If eBPF support or permissions are unavailable, it reports that clearly and the GUI falls back to the clean unavailable state.
 
 Until the helper exists and is enabled, the Applications tab shows a clean unavailable state:
 
@@ -62,3 +82,11 @@ Application traffic tracking records local process names, executable paths, and 
 ## Limitation
 
 Per-application attribution is not fully available in this phase. If multiple applications use the active local proxy, their traffic may appear together under the active proxy profile, and Xray may appear as the main network user until the optional helper provides process attribution.
+
+When Xray is detected by the helper, it is labeled as:
+
+```text
+Xray Core / Proxy Tunnel
+```
+
+It is not hidden, because Xray really performs the encrypted remote connection when the proxy is active.

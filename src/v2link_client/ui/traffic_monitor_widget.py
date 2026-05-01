@@ -35,6 +35,7 @@ from v2link_client.core.traffic_settings import (
     save_traffic_settings,
 )
 from v2link_client.core.traffic_store import (
+    AppIdentity,
     AppUsageSummary,
     DailyTrafficUsage,
     ProxyTrafficSample,
@@ -387,6 +388,7 @@ class TrafficMonitorWidget(QWidget):
         self.stats_available_label = QLabel("no")
         self.app_tracking_enabled_label = QLabel("no")
         self.helper_status_label = QLabel("unavailable")
+        self.helper_backend_label = QLabel("unavailable")
         self.helper_endpoint_label = QLabel("not configured")
         self.helper_response_label = QLabel("none")
         self.helper_permission_label = QLabel("no")
@@ -410,6 +412,7 @@ class TrafficMonitorWidget(QWidget):
             ("Stats available", self.stats_available_label),
             ("App tracking setting", self.app_tracking_enabled_label),
             ("Helper installed/running", self.helper_status_label),
+            ("Helper backend", self.helper_backend_label),
             ("Helper socket/API", self.helper_endpoint_label),
             ("Last helper response", self.helper_response_label),
             ("Permission state", self.helper_permission_label),
@@ -529,7 +532,26 @@ class TrafficMonitorWidget(QWidget):
             return
         rows: list[AppUsageSummary] = []
         if self._settings.app_tracking_enabled and self._netmon_status.running:
-            rows = self._netmon_client.get_today_app_usage()
+            live_rows = self._netmon_client.get_live_apps()
+            if self._store is not None:
+                for row in live_rows:
+                    self._store.record_app_sample(
+                        AppIdentity(
+                            id=row.app_id,
+                            name=row.app_name,
+                            executable_path=row.executable_path,
+                            pid=row.pid,
+                            uid=row.uid,
+                            trusted_identity=row.confidence in {"exact", "high"},
+                        ),
+                        rx_bytes=row.rx_bytes,
+                        tx_bytes=row.tx_bytes,
+                        source=row.source,
+                        confidence=row.confidence,
+                    )
+                rows = self._store.get_today_app_usage()
+            else:
+                rows = live_rows
         elif self._store is not None:
             rows = self._store.get_today_app_usage()
 
@@ -628,6 +650,7 @@ class TrafficMonitorWidget(QWidget):
                 f"installed={'yes' if self._netmon_status.installed else 'no'}, "
                 f"running={'yes' if self._netmon_status.running else 'no'}"
             )
+            self.helper_backend_label.setText(self._netmon_status.backend)
             self.helper_endpoint_label.setText(
                 self._netmon_status.api_url or self._netmon_status.socket_path or "not configured"
             )

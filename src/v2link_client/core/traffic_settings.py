@@ -20,7 +20,7 @@ class TrafficSettings:
     show_experimental_warning: bool = True
     detailed_retention_days: int = 30
     daily_retention_days: int = DEFAULT_DAILY_RETENTION_DAYS
-    netmon_provider: str = "disabled"
+    netmon_provider: str = "socket"
 
 
 def get_traffic_settings_path() -> Path:
@@ -38,9 +38,9 @@ def load_traffic_settings(path: Path | None = None) -> TrafficSettings:
         payload.get("daily_retention_days"),
         DEFAULT_DAILY_RETENTION_DAYS,
     )
-    provider = str(payload.get("netmon_provider", "disabled") or "disabled").strip().lower()
-    if provider not in {"disabled", "mock"}:
-        provider = "disabled"
+    provider = str(payload.get("netmon_provider", "socket") or "socket").strip().lower()
+    if provider not in {"disabled", "mock", "socket"}:
+        provider = "socket"
 
     return TrafficSettings(
         proxy_history_enabled=bool(payload.get("proxy_history_enabled", True)),

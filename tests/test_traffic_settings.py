@@ -15,6 +15,7 @@ def test_traffic_settings_defaults_when_missing(tmp_path) -> None:
     assert settings.show_experimental_warning is True
     assert settings.detailed_retention_days == 30
     assert settings.daily_retention_days == 365
+    assert settings.netmon_provider == "socket"
 
 
 def test_traffic_settings_load_save(tmp_path) -> None:
@@ -45,4 +46,4 @@ def test_traffic_settings_sanitizes_invalid_values(tmp_path) -> None:
 
     assert settings.detailed_retention_days == 30
     assert settings.daily_retention_days == 365
-    assert settings.netmon_provider == "disabled"
+    assert settings.netmon_provider == "socket"

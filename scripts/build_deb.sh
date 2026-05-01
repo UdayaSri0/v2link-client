@@ -11,17 +11,21 @@ CONTROL_TEMPLATE="${DEB_TEMPLATE_DIR}/control.in"
 WRAPPER_TEMPLATE="${DEB_TEMPLATE_DIR}/v2link-client-wrapper.in"
 DESKTOP_SRC="${DEB_TEMPLATE_DIR}/v2link-client.desktop"
 ICON_SRC="${ROOT_DIR}/packaging/icon.png"
+NETMON_SERVICE_SRC="${DEB_TEMPLATE_DIR}/v2link-netmon.service"
 DEPENDS="libegl1, libgl1, libxkbcommon-x11-0, libdbus-1-3, libxcb-cursor0"
 
 if [[ ! -d "${PYINSTALLER_DIR}" ]]; then
   "${ROOT_DIR}/scripts/build_pyinstaller.sh"
 fi
 
+"${ROOT_DIR}/scripts/build_netmon.sh"
+
 for required_file in \
   "${CONTROL_TEMPLATE}" \
   "${WRAPPER_TEMPLATE}" \
   "${DESKTOP_SRC}" \
   "${ICON_SRC}" \
+  "${NETMON_SERVICE_SRC}" \
   "${DEB_TEMPLATE_DIR}/postinst" \
   "${DEB_TEMPLATE_DIR}/postrm"; do
   if [[ ! -f "${required_file}" ]]; then
@@ -93,14 +97,18 @@ OPT_DIR="${PKG_DIR}/opt/${APP_NAME}"
 BIN_DIR="${PKG_DIR}/usr/bin"
 APPS_DIR="${PKG_DIR}/usr/share/applications"
 ICON_DIR="${PKG_DIR}/usr/share/icons/hicolor/256x256/apps"
+LIB_DIR="${PKG_DIR}/usr/lib/${APP_NAME}"
+SYSTEMD_DIR="${PKG_DIR}/lib/systemd/system"
 OUTPUT_DEB="${DIST_DIR}/${APP_NAME}_${VERSION_NAME}_${ARCH_NAME}.deb"
 
 rm -rf "${PKG_DIR}"
-mkdir -p "${DEBIAN_DIR}" "${OPT_DIR}" "${BIN_DIR}" "${APPS_DIR}" "${ICON_DIR}"
+mkdir -p "${DEBIAN_DIR}" "${OPT_DIR}" "${BIN_DIR}" "${APPS_DIR}" "${ICON_DIR}" "${LIB_DIR}" "${SYSTEMD_DIR}"
 
 cp -a "${PYINSTALLER_DIR}/." "${OPT_DIR}/"
+cp "${ROOT_DIR}/dist/netmon/v2link-netmon" "${LIB_DIR}/v2link-netmon"
 cp "${DESKTOP_SRC}" "${APPS_DIR}/${APP_NAME}.desktop"
 cp "${ICON_SRC}" "${ICON_DIR}/${APP_NAME}.png"
+cp "${NETMON_SERVICE_SRC}" "${SYSTEMD_DIR}/v2link-netmon.service"
 
 sed \
   -e "s|@VERSION@|${VERSION_NAME}|g" \
@@ -118,6 +126,7 @@ cp "${DEB_TEMPLATE_DIR}/postrm" "${DEBIAN_DIR}/postrm"
 
 chmod 0755 "${BIN_DIR}/${APP_NAME}" "${DEBIAN_DIR}/postinst" "${DEBIAN_DIR}/postrm"
 chmod 0755 "${OPT_DIR}/${APP_NAME}" || true
+chmod 0755 "${LIB_DIR}/v2link-netmon"
 
 rm -f "${OUTPUT_DEB}"
 dpkg-deb --build --root-owner-group "${PKG_DIR}" "${OUTPUT_DEB}" >/dev/null
