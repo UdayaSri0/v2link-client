@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+
+### Changed
+
+### Fixed
+
+## [0.2.0] - 2026-05-26
+
+### Added
 - Added a Traffic Monitor backed by local SQLite storage for proxy/session/profile upload and download history.
 - Added daily usage aggregation, profile usage totals, CSV export support, and a lightweight in-app daily usage chart.
 - Added session-level Traffic Monitor history with date drill-down, session detail panels, speed/cumulative sample charts, and session status reporting for completed, active, crashed, or unknown sessions.

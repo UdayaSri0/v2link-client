@@ -6,6 +6,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_project_version_is_release_target() -> None:
+    import tomllib
+
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert data["project"]["version"] == "0.2.0"
+
+
 def test_fetch_xray_script_pins_official_release_and_sha() -> None:
     script = (ROOT / "scripts" / "fetch_xray_core.sh").read_text(encoding="utf-8")
     assert "https://github.com/XTLS/Xray-core/releases/download" in script
@@ -34,3 +41,13 @@ def test_build_scripts_contain_xray_copy_checks() -> None:
     assert "build_netmon.sh" in release
     assert "AppImage layout missing bundled Xray" in release
     assert ".deb layout missing bundled Xray" in release
+
+
+def test_build_scripts_use_release_artifact_naming() -> None:
+    appimage = (ROOT / "scripts" / "build_appimage.sh").read_text(encoding="utf-8")
+    deb = (ROOT / "scripts" / "build_deb.sh").read_text(encoding="utf-8")
+    release = (ROOT / "scripts" / "build_release.sh").read_text(encoding="utf-8")
+
+    assert '${APP_NAME}-${VERSION_NAME}-linux-${ARCH_NAME}.AppImage' in appimage
+    assert '${APP_NAME}_${VERSION_NAME}_${ARCH_NAME}.deb' in deb
+    assert "sha256sum ./*.AppImage ./*.deb > SHA256SUMS" in release

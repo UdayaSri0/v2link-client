@@ -9,4 +9,6 @@ Depends: @DEPENDS@
 Description: Linux desktop client for V2Ray-style links
  Linux desktop client for V2Ray-style links built with Python and PyQt6.
  Includes bundled Xray-core for normal operation and provides profile
- management, diagnostics, and desktop proxy integration.
+ management, diagnostics, desktop proxy integration, local Traffic Monitor
+ history, and an optional v2link-netmon helper service for advanced
+ per-application tracking preparation.

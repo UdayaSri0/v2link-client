@@ -11,6 +11,7 @@ import subprocess
 import sys
 from typing import Any
 
+from v2link_client import __version__
 from v2link_client.core.proxy_manager import SNAPSHOT_FILE, get_backend_warning_history
 from v2link_client.core.storage import get_logs_dir, get_state_dir
 from v2link_client.core.traffic_store import get_traffic_db_path
@@ -304,6 +305,7 @@ def collect_diagnostics(state: Any | None = None) -> str:
 
     env_info = get_host_subprocess_env_info()
     lines.append("Runtime")
+    lines.append(f"- App version: v{__version__}")
     lines.append(f"- Mode: {env_info.runtime_kind}")
     lines.append(f"- Executable: {env_info.executable_path}")
     lines.append(f"- Host subprocess env: {env_info.mode}")

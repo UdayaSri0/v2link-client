@@ -31,6 +31,7 @@ def test_collect_diagnostics_includes_gsettings_proxy_state(tmp_path, monkeypatc
 
     report = diag.collect_diagnostics()
     assert "Runtime" in report
+    assert "- App version: v" in report
     assert "- Host subprocess env: clean-host" in report
     assert "System Proxy (gsettings)" in report
     assert "Proxy Backend Warnings" in report

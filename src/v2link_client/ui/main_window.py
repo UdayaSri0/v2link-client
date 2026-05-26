@@ -565,9 +565,10 @@ class MainWindow(QMainWindow):
             "Linux desktop client for V2Ray-style links powered by Xray-core.<br><br>"
             "<b>Highlights</b><br>"
             "• Saved profiles with validation persistence across restarts<br>"
-            "• Profile manager with default/favorite/edit/duplicate actions<br>"
-            "• Runtime diagnostics and system proxy drift reconciliation<br>"
-            "• Update checks for GitHub releases (.AppImage and .deb)"
+            "• Traffic Monitor with local SQLite proxy/profile history<br>"
+            "• Session history, daily charts, and CSV exports<br>"
+            "• Optional v2link-netmon helper preparation for per-app tracking<br>"
+            "• Runtime diagnostics and system proxy drift reconciliation"
         )
         QMessageBox.about(self, "About v2link-client", text)
 

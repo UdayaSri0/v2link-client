@@ -87,7 +87,7 @@ NOTICE_DETAILS_TEXT = (
     "v2link-netmon helper. Local proxy traffic may appear under Xray, and all history is stored "
     "locally on this device."
 )
-TRAFFIC_MONITOR_DOCS_URL = "https://github.com/UdayaSri0/v2link-client/blob/Proxcy-fix/docs/traffic-monitor.md"
+TRAFFIC_MONITOR_DOCS_URL = "https://github.com/UdayaSri0/v2link-client/blob/beta/docs/traffic-monitor.md"
 
 
 def _wrap_scroll_area(widget: QWidget) -> QScrollArea:
