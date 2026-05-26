@@ -2,7 +2,7 @@
 
 Linux desktop client for V2Ray-style links, built with Python 3.11+ and PyQt6, powered by Xray-core.
 
-Current release target: **v0.1.9.0.5**
+Current release target: **v0.2.0**
 
 Project status: **beta** (stable for daily use, focused feature scope).
 
@@ -24,7 +24,9 @@ Project status: **beta** (stable for daily use, focused feature scope).
 - Local SOCKS5 + HTTP proxy endpoints (auto-select free ports when needed)
 - Optional desktop system-proxy apply/restore while running
 - Health indicator + ping + speed test + traffic/uptime metrics
-- Traffic Monitor with local proxy/profile usage history, daily totals, simple charts, and advanced optional per-app tracking readiness
+- Traffic Monitor dashboard with Overview, Applications, Proxy Profiles, History, Settings, and Diagnostics tabs
+- Local SQLite proxy/profile traffic history with daily totals, profile totals, session history, charts, and CSV export
+- Optional per-application tracking preparation through the advanced `v2link-netmon` helper path
 - Diagnostics panel with runtime proxy state and log access
 - Built-in update check against GitHub Releases
 - Light/Dark theme
@@ -216,10 +218,12 @@ The app resolves Xray-core in this order: custom path from **Xray Settings**, bu
 
 The Traffic Monitor records local traffic history and shows:
 
+- Dashboard tabs for **Overview**, **Applications**, **Proxy Profiles**, **History**, **Settings**, and **Diagnostics**
 - Today upload/download totals
 - Current session upload/download and live speed
 - This month upload/download totals
 - Per saved-profile upload/download totals
+- Daily usage aggregation and a lightweight in-app daily usage chart
 - Daily history with Today, Last 7 days, Last 30 days, This month, and custom date ranges
 - Session history for each selected date, including start/end time, duration, profile, download, upload, total, average speed, and status
 - Session drill-down charts for speed or cumulative usage over time
@@ -251,7 +255,7 @@ $XDG_CONFIG_HOME/v2link-client/traffic_settings.json
 
 ## Per-Application Tracking
 
-Per-application tracking is advanced and optional. True Linux app attribution needs the optional privileged helper service `v2link-netmon`, because process/executable attribution must happen outside the unprivileged GUI. The GUI never runs as root.
+Per-application tracking is advanced and optional. It is separate from normal proxy/profile traffic tracking, which works through Xray's Stats API without root permission. True Linux app attribution needs the optional privileged helper service `v2link-netmon`, because process/executable attribution must happen outside the unprivileged GUI. The GUI never runs as root.
 
 Debian packages install the optional helper and systemd service, but do not enable it automatically:
 
@@ -260,7 +264,7 @@ sudo systemctl enable --now v2link-netmon
 sudo systemctl disable --now v2link-netmon
 ```
 
-The helper exposes read-only JSON stats over `/run/v2link-client/netmon.sock`. If the helper, permissions, or eBPF backend are unavailable, the GUI stays unprivileged and shows a clear unavailable/diagnostic state.
+The helper exposes read-only JSON stats over `/run/v2link-client/netmon.sock`. In v0.2.0 this path is prepared/scaffolded and remains optional; if the helper, permissions, or eBPF backend are unavailable, the GUI stays unprivileged and shows a clear unavailable/diagnostic state.
 
 ## Privacy
 
