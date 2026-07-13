@@ -1703,6 +1703,11 @@ class MainWindow(QMainWindow):
             warning = self._last_traffic_sample.warning
         elif not self._stats_available:
             warning = self._last_stats_query_result
+        worker_error = (
+            self._traffic_storage_worker.last_error
+            if self._traffic_storage_worker is not None
+            else None
+        )
         self.traffic_monitor_widget.set_diagnostics(
             api_server=self._traffic_api_server(),
             stats_available=self._stats_available,
@@ -1711,7 +1716,7 @@ class MainWindow(QMainWindow):
                 self._last_traffic_sample.timestamp if self._last_traffic_sample is not None else None
             ),
             warning=warning,
-            store_error=self._last_traffic_store_error,
+            store_error=self._last_traffic_store_error or worker_error,
         )
 
     def _traffic_monitor_is_visible(self) -> bool:
@@ -1809,6 +1814,11 @@ class MainWindow(QMainWindow):
         now = time.monotonic()
         xray_resolution = self._current_xray_resolution(refresh=False)
         xray_assets = xray_asset_status(xray_resolution)
+        cleanup = (
+            self._traffic_storage_worker.last_cleanup
+            if self._traffic_storage_worker is not None
+            else None
+        )
 
         desired = self._proxy_status_to_dict(audit.desired if audit is not None else None)
         actual = self._proxy_status_to_dict(audit.actual if audit is not None else None)
@@ -1903,6 +1913,10 @@ class MainWindow(QMainWindow):
                     if self._traffic_storage_worker is not None
                     else None
                 ),
+                "last_retention_cleanup_at": cleanup.completed_at if cleanup is not None else None,
+                "last_retention_cleanup_duration_ms": cleanup.duration_ms if cleanup is not None else None,
+                "last_retention_cleanup_rows_removed": cleanup.rows_removed if cleanup is not None else None,
+                "last_retention_cleanup_error": cleanup.error if cleanup is not None else None,
                 "proxy_history_enabled": bool(self._traffic_settings.proxy_history_enabled),
                 "app_tracking_enabled": bool(self._traffic_settings.app_tracking_enabled),
                 "detailed_retention_days": int(self._traffic_settings.detailed_retention_days),

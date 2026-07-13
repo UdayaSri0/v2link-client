@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -246,4 +248,77 @@ def test_invisible_tab_activation_does_not_refresh(tmp_path) -> None:
     widget.tabs.setCurrentIndex(1)
 
     widget.refresh_applications.assert_not_called()
+    widget.close()
+
+
+def test_hidden_tab_activation_does_not_query_storage(tmp_path) -> None:
+    _app()
+    from v2link_client.core.traffic_store import TrafficStore
+    from v2link_client.ui.traffic_monitor_widget import TrafficMonitorWidget
+
+    store = TrafficStore(tmp_path / "traffic.sqlite3")
+    widget = TrafficMonitorWidget(store)
+    store.get_profile_summaries = Mock(return_value=[])  # type: ignore[method-assign]
+    widget.hide()
+
+    widget.tabs.setCurrentIndex(2)
+    _app().processEvents()
+
+    store.get_profile_summaries.assert_not_called()
+    widget.close()
+
+
+def test_session_detail_uses_bounded_query_and_completed_session_cache(tmp_path) -> None:
+    app = _app()
+    from v2link_client.core.traffic_store import TrafficStore
+    from v2link_client.ui.traffic_chart_widget import MAX_SESSION_CHART_POINTS
+    from v2link_client.ui.traffic_monitor_widget import TrafficMonitorWidget
+
+    store = TrafficStore(tmp_path / "traffic.sqlite3")
+    session_id = store.start_proxy_session(None, "Cached", "fp", _stats(0, 0), None, 1080, 8080)
+    store.record_proxy_sample(session_id, _stats(100, 200))
+    store.end_proxy_session(session_id)
+    bounded = Mock(wraps=store.get_session_chart_samples)
+    store.get_session_chart_samples = bounded  # type: ignore[method-assign]
+    store.get_session_samples = Mock(side_effect=AssertionError("automatic path loaded all samples"))  # type: ignore[method-assign]
+    widget = TrafficMonitorWidget(store)
+    widget._selected_history_session_id = session_id
+
+    widget._refresh_selected_session_detail()
+    deadline = time.monotonic() + 3.0
+    while session_id not in widget._session_detail_cache and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.005)
+
+    assert session_id in widget._session_detail_cache
+    bounded.assert_called_once_with(session_id, maximum_points=MAX_SESSION_CHART_POINTS)
+    widget._refresh_selected_session_detail()
+    bounded.assert_called_once()
+    store.get_session_samples.assert_not_called()
+    widget.close()
+
+
+def test_large_export_task_runs_outside_gui_callback(tmp_path) -> None:
+    app = _app()
+    from v2link_client.core.traffic_store import TrafficStore
+    from v2link_client.ui.traffic_monitor_widget import TrafficMonitorWidget
+
+    widget = TrafficMonitorWidget(TrafficStore(tmp_path / "traffic.sqlite3"))
+    started = threading.Event()
+    release = threading.Event()
+
+    def export() -> None:
+        started.set()
+        release.wait(3.0)
+
+    widget._start_export(export)
+
+    assert started.wait(2.0)
+    assert widget._export_in_flight is True
+    release.set()
+    deadline = time.monotonic() + 3.0
+    while widget._export_in_flight and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.005)
+    assert widget._export_in_flight is False
     widget.close()
