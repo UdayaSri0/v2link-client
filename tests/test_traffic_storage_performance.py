@@ -85,6 +85,31 @@ def test_storage_worker_batches_cumulative_counters_and_finalizes(tmp_path) -> N
     assert detail.upload_bytes == 350
     assert detail.download_bytes == 650
     assert detail.status == "completed"
+    today = store.get_today_summary()
+    assert (today.uplink_bytes, today.downlink_bytes) == (350, 650)
+    profile = store.get_profile_summaries(limit=1)[0]
+    assert (profile.uplink_bytes, profile.downlink_bytes) == (350, 650)
+
+
+def test_storage_worker_reuses_one_thread_owned_connection(tmp_path, monkeypatch) -> None:
+    store = TrafficStore(tmp_path / "traffic.sqlite3")
+    session_id = _session(store)
+    original = store._open_connection
+    opened = 0
+
+    def counted():
+        nonlocal opened
+        opened += 1
+        return original()
+
+    monkeypatch.setattr(store, "_open_connection", counted)
+    worker = TrafficStorageWorker(store)
+    assert worker.submit_sample(session_id, _stats(100, 200))
+    assert worker.submit_sample(session_id, _stats(300, 500))
+    assert worker.wait_until_idle(timeout_s=5.0)
+    worker.shutdown()
+
+    assert opened == 1
 
 
 def test_storage_worker_handles_counter_reset_and_short_session(tmp_path) -> None:
@@ -175,6 +200,7 @@ def test_existing_v2_database_migrates_without_losing_data(tmp_path) -> None:
     store.record_proxy_sample(session_id, _stats(100, 200))
     with sqlite3.connect(path) as conn:
         conn.execute("DELETE FROM schema_migrations WHERE version > 2")
+        conn.execute("DROP TABLE traffic_maintenance")
 
     reopened = TrafficStore(path)
 

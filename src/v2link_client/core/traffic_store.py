@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 import sqlite3
+import threading
 import time
 from typing import Any, Iterator
 from uuid import uuid4
@@ -252,6 +253,7 @@ class TrafficStore:
         self.db_path = db_path or get_traffic_db_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._active_proxy_session_id: str | None = None
+        self._thread_state = threading.local()
         self._migrate()
 
     def start_proxy_session(
@@ -553,12 +555,17 @@ class TrafficStore:
         start_date: str,
         end_date: str,
         *,
-        limit: int = DEFAULT_SESSION_QUERY_LIMIT,
+        limit: int | None = DEFAULT_SESSION_QUERY_LIMIT,
     ) -> list[ProxySessionSummary]:
         start, end_exclusive = _timestamp_range(start_date, end_date)
+        limit_sql = ""
+        params: list[Any] = [start, end_exclusive]
+        if limit is not None:
+            limit_sql = "LIMIT ?"
+            params.append(max(1, int(limit)))
         with self._connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT s.*,
                        COUNT(ps.id) AS sample_count,
                        MIN(ps.timestamp) AS first_sample_at,
@@ -569,9 +576,9 @@ class TrafficStore:
                   AND s.started_at < ?
                 GROUP BY s.id
                 ORDER BY s.started_at ASC
-                LIMIT ?
+                {limit_sql}
                 """,
-                (start, end_exclusive, max(1, int(limit))),
+                tuple(params),
             ).fetchall()
         return [self._session_summary_from_row(row) for row in rows]
 
@@ -953,7 +960,7 @@ class TrafficStore:
     ) -> None:
         destination = Path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        rows = self.get_sessions_for_range(start_date, end_date)
+        rows = self.get_sessions_for_range(start_date, end_date, limit=None)
         with destination.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             writer.writerow(
@@ -995,8 +1002,7 @@ class TrafficStore:
     def export_session_samples_csv(self, path: str | Path, *, session_id: str) -> None:
         destination = Path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        rows = self.get_session_samples(session_id)
-        with destination.open("w", newline="", encoding="utf-8") as handle:
+        with self._connect() as conn, destination.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             writer.writerow(
                 [
@@ -1009,7 +1015,18 @@ class TrafficStore:
                     "download_bps",
                 ]
             )
-            for row in rows:
+            rows = conn.execute(
+                """
+                SELECT session_id, timestamp, uplink_bytes, downlink_bytes,
+                       uplink_delta_bytes, downlink_delta_bytes, upload_bps, download_bps
+                FROM proxy_samples
+                WHERE session_id = ?
+                ORDER BY id ASC
+                """,
+                (session_id,),
+            )
+            for raw_row in rows:
+                row = self._proxy_sample_from_row(raw_row)
                 writer.writerow(
                     [
                         row.timestamp,
@@ -1370,11 +1387,30 @@ class TrafficStore:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
+        persistent = getattr(self._thread_state, "connection", None)
+        if isinstance(persistent, sqlite3.Connection):
+            with persistent:
+                yield persistent
+            return
         conn = self._open_connection()
         try:
             with conn:
                 yield conn
         finally:
+            conn.close()
+
+    @contextmanager
+    def persistent_thread_connection(self) -> Iterator[None]:
+        """Reuse one SQLite connection only within the calling worker thread."""
+        if getattr(self._thread_state, "connection", None) is not None:
+            yield
+            return
+        conn = self._open_connection()
+        self._thread_state.connection = conn
+        try:
+            yield
+        finally:
+            del self._thread_state.connection
             conn.close()
 
     def _migrate(self) -> None:

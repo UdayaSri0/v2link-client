@@ -34,6 +34,7 @@ class TrafficStorageWorker:
         self._lock = threading.Lock()
         self._last_error: str | None = None
         self._last_persisted: dict[str, TrafficStats] = {}
+        self._last_submitted: dict[str, TrafficStats] = {}
         self._last_cleanup: RetentionCleanupResult | None = None
         self._dropped_requests = 0
         self._accepting = True
@@ -70,10 +71,14 @@ class TrafficStorageWorker:
     def submit_sample(self, session_id: str, stats: TrafficStats) -> bool:
         if not self._accepting:
             return False
-        persisted = self.last_persisted_stats(session_id)
-        if persisted == stats and self.last_error is None:
-            return True
-        return self._submit(_StorageCommand("sample", session_id=session_id, stats=stats))
+        with self._lock:
+            if self._last_submitted.get(session_id) == stats and self._last_error is None:
+                return True
+        accepted = self._submit(_StorageCommand("sample", session_id=session_id, stats=stats))
+        if accepted:
+            with self._lock:
+                self._last_submitted[session_id] = stats
+        return accepted
 
     def submit_cleanup(self, retention_days: int, *, force: bool = False) -> bool:
         if not self._accepting:
@@ -140,6 +145,10 @@ class TrafficStorageWorker:
         return True
 
     def _run(self) -> None:
+        with self._store.persistent_thread_connection():
+            self._run_commands()
+
+    def _run_commands(self) -> None:
         while True:
             command = self._queue.get()
             try:
@@ -170,6 +179,8 @@ class TrafficStorageWorker:
             except Exception as exc:  # persistence must recover on the next cumulative sample
                 with self._lock:
                     self._last_error = str(exc)
+                    if command.session_id is not None:
+                        self._last_submitted.pop(command.session_id, None)
                 command.result["ok"] = False
             finally:
                 if command.finished is not None:
