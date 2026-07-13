@@ -19,6 +19,10 @@ def test_build_xray_config_for_vless_tls(tmp_path) -> None:
     )
     cfg = build_xray_config(parsed, logs_dir=tmp_path)
 
+    assert cfg["log"] == {"loglevel": "warning"}
+    assert "access" not in cfg["log"]
+    assert "error" not in cfg["log"]
+
     assert cfg["inbounds"][0]["listen"] == DEFAULT_LISTEN
     assert cfg["inbounds"][0]["port"] == DEFAULT_SOCKS_PORT
     assert cfg["inbounds"][1]["port"] == DEFAULT_HTTP_PORT
@@ -37,6 +41,17 @@ def test_build_xray_config_for_vless_tls(tmp_path) -> None:
     assert stream["tlsSettings"]["allowInsecure"] is False
     assert stream["tlsSettings"]["fingerprint"] == "chrome"
     assert stream["tlsSettings"]["verifyPeerCertByName"] == "aka.ms,prime.example.com"
+
+
+def test_detailed_xray_logging_is_opt_in_and_keeps_access_disabled(tmp_path) -> None:
+    parsed = parse_link(
+        "vless://11111111-1111-1111-1111-111111111111@example.com:443"
+        "?security=tls&type=tcp"
+    )
+
+    cfg = build_xray_config(parsed, logs_dir=tmp_path, detailed_logging=True)
+
+    assert cfg["log"] == {"loglevel": "debug"}
 
 
 def test_build_xray_config_rejects_grpc_without_service_name(tmp_path) -> None:

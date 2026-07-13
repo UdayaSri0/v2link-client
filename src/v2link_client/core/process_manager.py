@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import errno
 import logging
+import os
 from pathlib import Path
 import socket
 import subprocess
-from typing import IO
+import threading
 
 from v2link_client.core.errors import (
     BinaryMissingError,
@@ -22,6 +23,7 @@ from v2link_client.core.errors import (
     PortInUseError,
 )
 from v2link_client.core.storage import get_logs_dir
+from v2link_client.core.owned_process import terminate_owned_process
 from v2link_client.core.system_subprocess import build_host_subprocess_env
 from v2link_client.core.xray_locator import (
     MISSING_XRAY_MESSAGE,
@@ -30,6 +32,9 @@ from v2link_client.core.xray_locator import (
 )
 
 logger = logging.getLogger(__name__)
+
+XRAY_STDOUT_MAX_BYTES = 2 * 1024 * 1024
+XRAY_STDOUT_BACKUP_COUNT = 2
 
 
 CoreBinary = XrayBinary
@@ -121,8 +126,8 @@ class XrayProcessManager:
     def __init__(self, xray: CoreBinary | None = None) -> None:
         self._xray: CoreBinary | None = xray
         self._proc: subprocess.Popen[bytes] | None = None
-        self._stdout_handle: IO[str] | None = None
         self._stdout_path: Path | None = None
+        self._stdout_thread: threading.Thread | None = None
 
     def _ensure_binary(self) -> CoreBinary:
         if self._xray is None:
@@ -143,6 +148,12 @@ class XrayProcessManager:
             return None
         return self._xray.path
 
+    @property
+    def pid(self) -> int | None:
+        if self._proc is None or self._proc.poll() is not None:
+            return None
+        return int(self._proc.pid)
+
     def is_running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
@@ -154,6 +165,8 @@ class XrayProcessManager:
     def start(self, config_path: Path) -> None:
         if self.is_running():
             return
+        if self._proc is not None:
+            self.stop()
 
         xray = self._ensure_binary()
         if not xray.path:
@@ -164,16 +177,22 @@ class XrayProcessManager:
         logs_dir = get_logs_dir()
         logs_dir.mkdir(parents=True, exist_ok=True)
         self._stdout_path = logs_dir / "xray_stdout.log"
-        self._stdout_handle = self._stdout_path.open("a", encoding="utf-8")
+        _bound_existing_log(self._stdout_path)
+        # Older releases wrote these directly from Xray. Keep legacy files
+        # bounded even though current configs route diagnostic output through
+        # the managed stdout stream.
+        _bound_existing_log(logs_dir / "xray_access.log")
+        _bound_existing_log(logs_dir / "xray_error.log")
 
         cmd = [xray.path, "run", "-c", str(config_path)]
         env, env_info = build_host_subprocess_env()
         try:
             self._proc = subprocess.Popen(
                 cmd,
-                stdout=self._stdout_handle,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 env=env,
+                start_new_session=True,
             )
         except FileNotFoundError as exc:
             raise BinaryMissingError(
@@ -185,6 +204,15 @@ class XrayProcessManager:
                 f"{xray.name} not executable: {xray.path}",
                 user_message=f"{xray.name} binary is not executable: {xray.path}",
             ) from exc
+
+        proc = self._proc
+        self._stdout_thread = threading.Thread(
+            target=_pump_bounded_stdout,
+            args=(proc, self._stdout_path),
+            name="v2link-xray-log",
+            daemon=True,
+        )
+        self._stdout_thread.start()
 
         logger.info(
             "Started xray pid=%s [env_mode=%s removed_env=%s]",
@@ -198,16 +226,63 @@ class XrayProcessManager:
             return
 
         proc = self._proc
-        self._proc = None
-
+        returncode = proc.poll()
         try:
-            proc.terminate()
-            proc.wait(timeout=timeout_s)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=timeout_s)
+            returncode = terminate_owned_process(proc, timeout_s=timeout_s)
         finally:
-            logger.info("Stopped xray with returncode=%s", proc.returncode)
-            if self._stdout_handle is not None:
-                self._stdout_handle.close()
-            self._stdout_handle = None
+            self._proc = None
+            thread = self._stdout_thread
+            self._stdout_thread = None
+            if thread is not None:
+                thread.join(max(0.1, float(timeout_s)))
+            stdout = getattr(proc, "stdout", None)
+            if stdout is not None and not stdout.closed:
+                stdout.close()
+            logger.info("Stopped xray with returncode=%s", returncode)
+
+
+def _pump_bounded_stdout(proc: subprocess.Popen[bytes], path: Path) -> None:
+    stream = proc.stdout
+    if stream is None:
+        return
+    try:
+        while True:
+            chunk = stream.read1(64 * 1024)
+            if not chunk:
+                return
+            _append_bounded(path, chunk)
+    except (OSError, ValueError):
+        logger.debug("Xray stdout stream closed during shutdown", exc_info=True)
+
+
+def _append_bounded(path: Path, chunk: bytes) -> None:
+    if len(chunk) > XRAY_STDOUT_MAX_BYTES:
+        chunk = chunk[-XRAY_STDOUT_MAX_BYTES :]
+    current_size = path.stat().st_size if path.exists() else 0
+    if current_size + len(chunk) > XRAY_STDOUT_MAX_BYTES:
+        _rotate_log(path)
+    with path.open("ab") as handle:
+        handle.write(chunk)
+
+
+def _bound_existing_log(path: Path) -> None:
+    try:
+        if path.exists() and path.stat().st_size > XRAY_STDOUT_MAX_BYTES:
+            with path.open("rb") as source:
+                source.seek(-XRAY_STDOUT_MAX_BYTES, os.SEEK_END)
+                tail = source.read()
+            with path.open("wb") as target:
+                target.write(tail)
+    except OSError:
+        logger.warning("Could not bound Xray log %s", path, exc_info=True)
+
+
+def _rotate_log(path: Path) -> None:
+    for index in range(XRAY_STDOUT_BACKUP_COUNT, 0, -1):
+        source = path if index == 1 else path.with_name(f"{path.name}.{index - 1}")
+        target = path.with_name(f"{path.name}.{index}")
+        if not source.exists():
+            continue
+        if index == XRAY_STDOUT_BACKUP_COUNT:
+            target.unlink(missing_ok=True)
+        os.replace(source, target)

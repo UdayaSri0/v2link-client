@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Hardened application shutdown into an ordered, idempotent flow that invalidates late callbacks, finalises traffic persistence, restores owned proxy state, drains storage, and bounds worker waits.
+- Launch and reap GUI-owned Xray and temporary stats-query children in private process groups, with TERM-to-KILL escalation that never targets unrelated system Xray or `v2link-netmon`.
+- Disabled Xray access logging by default and bounded Xray stdout to 2 MiB with two backups; detailed bounded diagnostic logging is now opt-in.
+- Added cached performance diagnostics for polling, callbacks, storage, refreshes, chart bounds, database/WAL sizes, aggregate counts, owned PIDs, proxy backend, and netmon state without exposing private profile data.
+- Added `scripts/diagnose_runtime_performance.sh`, a read-only, non-root inspection tool for process, resource, database, log, and service state.
+- Moved proxy drift reconciliation fully into the background audit worker.
+
 All notable changes to this project are documented in this file.
 
 ## [Unreleased]

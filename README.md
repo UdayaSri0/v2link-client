@@ -28,6 +28,7 @@ Project status: **beta** (stable for daily use, focused feature scope).
 - Local SQLite proxy/profile traffic history with daily totals, profile totals, session history, charts, and CSV export
 - Optional per-application tracking preparation through the advanced `v2link-netmon` helper path
 - Diagnostics panel with runtime proxy state and log access
+- Cached performance diagnostics and a read-only runtime inspection script
 - Built-in update check against GitHub Releases
 - Light/Dark theme
 
@@ -235,6 +236,10 @@ The Traffic Monitor records local traffic history and shows:
 
 Proxy/profile tracking records traffic from Xray's Stats API while the core is running. It works in the normal GUI with no root permission because Xray provides proxy counters through its local API. The app does not use `xray api -reset`, so live labels and history do not fight over counters.
 
+Live counters are polled every 2 seconds, while cumulative history is persisted every 5 seconds through one bounded SQLite writer. Overview work runs at most every 10 seconds and only for its visible tab. History and diagnostics do not query on live ticks. Automatic session charts load and render at most 900 peak-preserving points; detailed samples default to 30-day retention.
+
+The original progressive stutter came from coupling each live callback to synchronous SQLite writes, full dashboard/history refreshes, and increasingly large chart reads. Those paths are now separated and bounded. See [Traffic Monitor internals](docs/traffic-monitor.md) and [runtime performance troubleshooting](docs/runtime-performance-troubleshooting.md).
+
 Bundled Xray-core is enough for proxy/profile tracking in official AppImage, `.deb`, and APT installs. Per-application tracking is separate and still needs the optional helper service described below.
 
 Daily totals are aggregated by sample date and are useful for range summaries. Session totals are grouped by each Start/Stop run, so a connection from 20:00 to 20:30 appears as one session under that date. CSV export supports daily summaries, session summaries, and selected-session samples.
@@ -279,6 +284,9 @@ Per-application attribution is not perfect when a local proxy is involved. When 
 - If proxy/profile totals stay at zero, confirm Xray is running and the diagnostics tab shows a configured stats API server.
 - If the Applications tab says the helper is unavailable, enable the optional service with `sudo systemctl enable --now v2link-netmon`.
 - If the helper is running but eBPF is unavailable, check Traffic Monitor diagnostics for kernel/capability details.
+- For growing CPU, memory, logs, or suspected leftover processes, run `./scripts/diagnose_runtime_performance.sh` as your normal user. It prints aggregate sizes and process metadata, never profile URLs, credentials, traffic rows, or process arguments. Exit code `1` means it found a possible stale Xray/stats process to inspect; it never kills anything.
+- Closing V2Link stops only the GUI-owned Xray process group and temporary `xray api statsquery` child. The independent system `v2link-netmon.service` may remain running by design.
+- Python logs rotate at 2 MiB with five backups. `xray_stdout.log` is bounded to 2 MiB with two backups. Xray access logging is disabled by default; detailed bounded diagnostic logging can be enabled under **Xray Settings**.
 - AppImage builds work without the helper and will show the helper-unavailable state.
 
 ## Supported Link Scope
@@ -301,6 +309,11 @@ Not yet implemented:
 - Saved profiles: `$XDG_CONFIG_HOME/v2link-client/profiles.json` (fallback `~/.config/v2link-client/profiles.json`)
 - Preferences/legacy compatibility: `~/.config/v2link-client/profile.json`
 - Optional custom Xray path: `$XDG_CONFIG_HOME/v2link-client/xray_settings.json`
+- Traffic settings: `$XDG_CONFIG_HOME/v2link-client/traffic_settings.json`
+- Traffic database: `$XDG_DATA_HOME/v2link-client/traffic.sqlite3`
+- Runtime state and logs: `$XDG_STATE_HOME/v2link-client/` (logs are in `logs/`)
+
+Unset XDG variables use the normal Linux defaults under `~/.config`, `~/.local/share`, and `~/.local/state`. To stop detailed sample growth, turn off proxy/profile history in **Traffic Monitor → Settings**; aggregate display still remains available for the live session.
 - Runtime state and generated config: `~/.local/state/v2link-client/`
 - Logs: `~/.local/state/v2link-client/logs/`
 

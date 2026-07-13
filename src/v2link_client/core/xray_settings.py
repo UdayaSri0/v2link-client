@@ -14,6 +14,7 @@ XRAY_SETTINGS_FILE = "xray_settings.json"
 class XraySettings:
     use_custom_binary: bool = False
     custom_binary_path: str | None = None
+    detailed_logging: bool = False
 
 
 def get_xray_settings_path() -> Path:
@@ -30,6 +31,7 @@ def load_xray_settings(path: Path | None = None) -> XraySettings:
     return XraySettings(
         use_custom_binary=bool(data.get("use_custom_binary", False)),
         custom_binary_path=custom_path.strip() if custom_path else None,
+        detailed_logging=bool(data.get("detailed_logging", False)),
     )
 
 
@@ -39,5 +41,6 @@ def save_xray_settings(settings: XraySettings, path: Path | None = None) -> None
         {
             "use_custom_binary": bool(settings.use_custom_binary),
             "custom_binary_path": settings.custom_binary_path or "",
+            "detailed_logging": bool(settings.detailed_logging),
         },
     )
