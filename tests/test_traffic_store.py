@@ -33,7 +33,7 @@ def test_traffic_store_schema_creation(tmp_path) -> None:
         assert "daily_app_usage" in tables
         assert "app_tracking_events" in tables
         version = conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-        assert version == 2
+        assert version == traffic_store.SCHEMA_VERSION
 
 
 def test_session_start_and_end(tmp_path) -> None:
