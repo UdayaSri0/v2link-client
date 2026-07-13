@@ -2,6 +2,31 @@
 
 The Traffic Monitor records historical proxy usage from Xray's Stats API. It also includes the data model, UI, settings, diagnostics, and client API needed for future per-application tracking.
 
+## Bounded live-update architecture
+
+The GUI intentionally separates four cadences:
+
+- Xray cumulative counters: every 2 seconds, with at most one `statsquery` child at once.
+- SQLite persistence: every 5 seconds through one bounded, coalescing writer queue.
+- Visible Overview refresh: every 10 seconds.
+- Visible Diagnostics refresh: every 30 seconds or when manually opened.
+
+A live result updates only in-memory labels and the current sample. It does not refresh History, Applications, Profiles, or Diagnostics. Automatic session charts query and render no more than 900 peak-preserving samples. Completed details are cached, history tables reuse unchanged data, and detailed rows default to 30-day retention. Daily aggregates default to 365 days.
+
+Slow-operation thresholds shown in diagnostics are 500 ms for a stats query, 100 ms for a database write, 200 ms for Overview, and 500 ms for History. They are diagnostic thresholds, not extra polling work.
+
+## Shutdown ownership
+
+Xray-core and each temporary `xray api statsquery` are launched in private process sessions. Stop and application shutdown invalidate pending callbacks, persist the latest cumulative counters, end the active traffic session, send TERM to the owned group, escalate to KILL after a bounded wait, and reap it. Repeating shutdown is safe.
+
+The system `v2link-netmon.service` is independent. Closing the GUI does not stop, restart, or kill it. Diagnostics label GUI-owned Xray, temporary stats-query, and netmon state separately.
+
+## Logs and privacy
+
+Xray access logging is disabled by default because it grows per request and can expose destinations. Xray warnings go to a bounded `xray_stdout.log` (2 MiB, two backups). The optional detailed mode in Xray Settings changes that bounded stream to debug level without enabling access logs. Python `app.log` rotates at 2 MiB with five backups.
+
+Cached performance diagnostics contain timings, queue depth, aggregate database counts/sizes, rendered point counts, and owned PIDs. They exclude session UUIDs, links, credentials, tokens, and private profile contents. Database counts and file sizes are refreshed only when Diagnostics is visible or manually opened—not on live ticks.
+
 Per-application tracking is marked **Advanced / Optional / Requires helper service**. The optional helper is `v2link-netmon`.
 
 ## Architecture
@@ -153,6 +178,8 @@ It is not hidden, because Xray really performs the encrypted remote connection w
 ## Troubleshooting
 
 - **No proxy/profile traffic:** start Xray from the GUI and check Diagnostics for the Xray stats API server and last query result.
+- **Progressive slowdown or suspected process leak:** run `./scripts/diagnose_runtime_performance.sh` without root, then compare owned PIDs, CPU/RSS, DB/WAL sizes, aggregate row counts, and bounded log sizes. See [runtime performance troubleshooting](runtime-performance-troubleshooting.md).
+- **Detailed history is not wanted:** disable proxy/profile history under Settings. Retention can otherwise be limited to 7, 30, or 90 days (or kept forever explicitly).
 - **Applications tab unavailable:** the optional helper is not installed, not enabled, or not reachable at `/run/v2link-client/netmon.sock`.
 - **Permission/capability warning:** the helper may not have enough privilege or kernel support for eBPF accounting. The GUI remains safe and unprivileged.
 - **AppImage:** AppImage builds include bundled Xray for proxy/profile stats, but they do not install or enable the privileged helper; install the Debian/APT package to use per-app tracking.
