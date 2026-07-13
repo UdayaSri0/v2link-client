@@ -43,6 +43,17 @@ def test_build_scripts_contain_xray_copy_checks() -> None:
     assert ".deb layout missing bundled Xray" in release
 
 
+def test_runtime_diagnostic_script_is_private_and_read_only() -> None:
+    script_path = ROOT / "scripts" / "diagnose_runtime_performance.sh"
+    script = script_path.read_text(encoding="utf-8")
+
+    assert script_path.stat().st_mode & 0o111
+    assert "sqlite3 -readonly" in script
+    assert "command arguments" in script
+    assert "kill " not in script
+    assert "systemctl stop" not in script
+
+
 def test_build_scripts_use_release_artifact_naming() -> None:
     appimage = (ROOT / "scripts" / "build_appimage.sh").read_text(encoding="utf-8")
     deb = (ROOT / "scripts" / "build_deb.sh").read_text(encoding="utf-8")
