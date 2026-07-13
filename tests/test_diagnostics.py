@@ -187,3 +187,37 @@ def test_collect_diagnostics_adds_bypass_hint_when_proxy_matches(tmp_path, monke
 
     report = diag.collect_diagnostics(state=state)
     assert "- Hint: If some apps still bypass the tunnel" in report
+
+
+def test_cached_performance_diagnostics_omit_sensitive_identifiers(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(diag, "_tool_available", lambda _name: False)
+    monkeypatch.setattr(diag, "get_state_dir", lambda: tmp_path)
+    monkeypatch.setattr(diag, "get_backend_warning_history", lambda limit=10: [])
+    state = {
+        "traffic": {
+            "current_session_active": True,
+            "session_count": 3,
+            "sample_count": 90,
+            "current_session_sample_count": 4,
+            "database_size_bytes": 4096,
+            "wal_size_bytes": 128,
+        },
+        "performance": {
+            "stats_interval_ms": 2000,
+            "stats_started": 4,
+            "stats_completed": 4,
+            "stats_skipped": 1,
+            "stats_failures": 0,
+            "chart_source_rows": 900,
+            "chart_rendered_points": 900,
+        },
+    }
+
+    report = diag.collect_diagnostics(state)
+
+    assert "Cached Performance Diagnostics" in report
+    assert "interval_ms=2000" in report
+    assert "source=900 rendered=900" in report
+    assert "Current proxy session active: yes" in report
+    assert "session-id-secret" not in report
+    assert "credential" not in report.lower()

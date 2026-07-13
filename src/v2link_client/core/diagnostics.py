@@ -114,7 +114,8 @@ def _append_runtime_state(lines: list[str], state: Any) -> None:
     system_proxy = state.get("system_proxy")
     xray = state.get("xray")
     traffic = state.get("traffic")
-    if not isinstance(system_proxy, dict) and not isinstance(xray, dict) and not isinstance(traffic, dict):
+    performance = state.get("performance")
+    if not any(isinstance(section, dict) for section in (system_proxy, xray, traffic, performance)):
         return
 
     lines.append("Runtime Proxy State")
@@ -161,6 +162,8 @@ def _append_runtime_state(lines: list[str], state: Any) -> None:
         lines.append(f"- Xray status: {status}")
         lines.append(f"- Xray source: {source_label}")
         lines.append(f"- Xray running: {'yes' if bool(xray.get('running')) else 'no'}")
+        lines.append(f"- App-owned Xray PID: {xray.get('pid') or 'none'}")
+        lines.append(f"- App-owned stats-query PID: {xray.get('stats_query_pid') or 'none'}")
         resolved_path = xray.get("resolved_path") or xray.get("binary_path")
         if resolved_path:
             lines.append(f"- Xray path: {resolved_path}")
@@ -238,13 +241,27 @@ def _append_runtime_state(lines: list[str], state: Any) -> None:
         )
         lines.append(f"- Detailed sample retention: {traffic.get('detailed_retention_days') or 'n/a'} days")
         lines.append(f"- Daily total retention: {traffic.get('daily_retention_days') or 'n/a'} days")
-        lines.append(f"- Current proxy session ID: {traffic.get('current_session_id') or 'none'}")
+        lines.append(
+            f"- Current proxy session active: "
+            f"{'yes' if bool(traffic.get('current_session_active')) else 'no'}"
+        )
         lines.append(f"- Last traffic sample time: {traffic.get('last_sample_time') or 'none'}")
         lines.append(f"- Last traffic store error: {traffic.get('last_store_error') or 'none'}")
         lines.append(
             f"- DB app tables present: "
             f"{'yes' if bool(traffic.get('app_tables_present')) else 'no'}"
         )
+        lines.append(
+            f"- DB/WAL size bytes: {traffic.get('database_size_bytes') or 0}/"
+            f"{traffic.get('wal_size_bytes') or 0}"
+        )
+        lines.append(
+            "- Stored sessions/samples/current-session samples: "
+            f"{traffic.get('session_count') or 0}/{traffic.get('sample_count') or 0}/"
+            f"{traffic.get('current_session_sample_count') or 0}"
+        )
+        if traffic.get("diagnostics_error"):
+            lines.append(f"- Storage diagnostics error: {traffic.get('diagnostics_error')}")
         netmon = traffic.get("netmon")
         if isinstance(netmon, dict):
             lines.append(
@@ -261,6 +278,56 @@ def _append_runtime_state(lines: list[str], state: Any) -> None:
             lines.append(f"- App helper last response: {netmon.get('last_response') or 'none'}")
             lines.append(f"- App helper last error: {netmon.get('last_error') or 'none'}")
             lines.append(f"- Kernel support: {netmon.get('kernel_support') or 'unknown/not checked yet'}")
+
+    if isinstance(performance, dict):
+        lines.append("")
+        lines.append("Cached Performance Diagnostics")
+        lines.append(f"- Closing: {'yes' if bool(performance.get('closing')) else 'no'}")
+        lines.append(
+            f"- Visible tabs: runtime={performance.get('current_runtime_tab') or 'unknown'} "
+            f"traffic={performance.get('current_traffic_tab') or 'unknown'}"
+        )
+        lines.append(
+            "- Stats polling: "
+            f"interval_ms={performance.get('stats_interval_ms')} "
+            f"in_flight={str(bool(performance.get('stats_in_flight'))).lower()} "
+            f"started={performance.get('stats_started') or 0} "
+            f"completed={performance.get('stats_completed') or 0} "
+            f"skipped={performance.get('stats_skipped') or 0} "
+            f"failures={performance.get('stats_failures') or 0}"
+        )
+        lines.append(
+            "- Stats duration ms: "
+            f"last={performance.get('stats_last_ms')} "
+            f"avg={performance.get('stats_average_ms')} "
+            f"max={performance.get('stats_max_ms')}"
+        )
+        lines.append(
+            "- Live callback ms: "
+            f"avg={performance.get('live_callback_average_ms')} "
+            f"max={performance.get('live_callback_max_ms')}"
+        )
+        lines.append(
+            "- Persistence: "
+            f"interval_ms={performance.get('persistence_interval_ms')} "
+            f"queue_depth={performance.get('persistence_queue_depth') or 0}"
+        )
+        lines.append(
+            "- DB write ms: "
+            f"last={performance.get('db_write_last_ms')} "
+            f"avg={performance.get('db_write_average_ms')} "
+            f"failures={performance.get('db_write_failures') or 0}"
+        )
+        lines.append(
+            "- Refresh ms: "
+            f"overview={performance.get('overview_refresh_last_ms')} "
+            f"history={performance.get('history_refresh_last_ms')}"
+        )
+        lines.append(
+            "- Session chart rows: "
+            f"source={performance.get('chart_source_rows') or 0} "
+            f"rendered={performance.get('chart_rendered_points') or 0}"
+        )
 
     lines.append("")
 

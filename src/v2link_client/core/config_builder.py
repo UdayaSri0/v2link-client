@@ -27,6 +27,7 @@ def build_xray_config(
     http_port: int = DEFAULT_HTTP_PORT,
     api_port: int | None = None,
     logs_dir: Path | None = None,
+    detailed_logging: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(link, VlessLink):
         raise ConfigBuildError(
@@ -81,9 +82,10 @@ def build_xray_config(
 
     config: dict[str, Any] = {
         "log": {
-            "loglevel": "warning",
-            "access": str(logs_dir / "xray_access.log"),
-            "error": str(logs_dir / "xray_error.log"),
+            # Access logs contain destinations and grow with every request, so
+            # they are disabled by default. Diagnostic detail remains in the
+            # bounded process stdout log.
+            "loglevel": "debug" if detailed_logging else "warning",
         },
         "inbounds": inbounds,
         "outbounds": [

@@ -37,7 +37,12 @@ class TrafficStorageWorker:
         self._last_submitted: dict[str, TrafficStats] = {}
         self._last_cleanup: RetentionCleanupResult | None = None
         self._dropped_requests = 0
+        self._write_count = 0
+        self._write_duration_total_ms = 0.0
+        self._last_write_duration_ms: float | None = None
+        self._write_failures = 0
         self._accepting = True
+        self._shutdown_lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, name="v2link-traffic-storage", daemon=True)
         self._thread.start()
 
@@ -63,6 +68,21 @@ class TrafficStorageWorker:
     def dropped_requests(self) -> int:
         with self._lock:
             return self._dropped_requests
+
+    @property
+    def write_metrics(self) -> dict[str, int | float | None]:
+        with self._lock:
+            average = (
+                self._write_duration_total_ms / self._write_count
+                if self._write_count
+                else None
+            )
+            return {
+                "last_ms": self._last_write_duration_ms,
+                "average_ms": average,
+                "failures": self._write_failures,
+                "count": self._write_count,
+            }
 
     def last_persisted_stats(self, session_id: str) -> TrafficStats | None:
         with self._lock:
@@ -122,18 +142,25 @@ class TrafficStorageWorker:
         return self._queue.unfinished_tasks == 0
 
     def shutdown(self, *, drain: bool = True, timeout_s: float = 5.0) -> bool:
-        if not self._thread.is_alive():
-            return True
-        self._accepting = False
-        if drain:
-            self.wait_until_idle(timeout_s=timeout_s)
-        command = _StorageCommand("stop")
-        try:
-            self._queue.put(command, timeout=max(0.1, float(timeout_s)))
-        except Full:
-            return False
-        self._thread.join(max(0.1, float(timeout_s)))
-        return not self._thread.is_alive()
+        with self._shutdown_lock:
+            if not self._thread.is_alive():
+                return True
+            timeout = max(0.1, float(timeout_s))
+            deadline = time.monotonic() + timeout
+            self._accepting = False
+            if drain:
+                self.wait_until_idle(timeout_s=max(0.0, deadline - time.monotonic()))
+            command = _StorageCommand("stop")
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                if remaining > 0:
+                    self._queue.put(command, timeout=remaining)
+                else:
+                    self._queue.put_nowait(command)
+            except Full:
+                return False
+            self._thread.join(max(0.0, deadline - time.monotonic()))
+            return not self._thread.is_alive()
 
     def _submit(self, command: _StorageCommand) -> bool:
         try:
@@ -151,6 +178,7 @@ class TrafficStorageWorker:
     def _run_commands(self) -> None:
         while True:
             command = self._queue.get()
+            started_at = time.monotonic()
             try:
                 if command.kind == "stop":
                     return
@@ -179,10 +207,17 @@ class TrafficStorageWorker:
             except Exception as exc:  # persistence must recover on the next cumulative sample
                 with self._lock:
                     self._last_error = str(exc)
+                    self._write_failures += 1
                     if command.session_id is not None:
                         self._last_submitted.pop(command.session_id, None)
                 command.result["ok"] = False
             finally:
+                if command.kind in {"sample", "end", "cleanup"}:
+                    duration_ms = (time.monotonic() - started_at) * 1000.0
+                    with self._lock:
+                        self._last_write_duration_ms = duration_ms
+                        self._write_duration_total_ms += duration_ms
+                        self._write_count += 1
                 if command.finished is not None:
                     command.finished.set()
                 self._queue.task_done()

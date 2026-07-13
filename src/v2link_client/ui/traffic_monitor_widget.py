@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from datetime import date, datetime, timedelta
 from typing import Callable
 
@@ -169,6 +170,10 @@ class TrafficMonitorWidget(QWidget):
         self._history_query_generation = 0
         self._session_detail_cache: dict[str, tuple[ProxySessionDetail, list[ProxyTrafficSample]]] = {}
         self._export_in_flight = False
+        self._closing = False
+        self._last_history_refresh_ms: float | None = None
+        self._last_chart_source_rows = 0
+        self._last_chart_rendered_points = 0
 
         self.notice_label = QLabel(NOTICE_COMPACT_TEXT)
         self.notice_label.setWordWrap(True)
@@ -513,11 +518,14 @@ class TrafficMonitorWidget(QWidget):
             self.store_error_label.setText(str(exc))
 
     def refresh_history(self) -> None:
+        started_at = time.monotonic()
         try:
             self._populate_history()
         except Exception as exc:  # pragma: no cover - defensive UI guard
             logger.exception("Failed to refresh traffic history")
             self.store_error_label.setText(str(exc))
+        finally:
+            self._last_history_refresh_ms = (time.monotonic() - started_at) * 1000.0
 
     def refresh_diagnostics(self) -> None:
         try:
@@ -1413,6 +1421,8 @@ class TrafficMonitorWidget(QWidget):
             self._refresh_selected_session_detail()
 
     def _refresh_selected_session_detail(self) -> None:
+        if self._closing:
+            return
         if self._store is None or not self._selected_history_session_id:
             self._clear_session_detail()
             return
@@ -1442,15 +1452,20 @@ class TrafficMonitorWidget(QWidget):
         self._thread_pool.start(worker)
 
     def _on_session_detail_loaded(self, payload: object) -> None:
+        if self._closing:
+            return
         generation, session_id, detail, samples = payload  # type: ignore[misc]
         if generation != self._history_query_generation:
             return
         if session_id != self._selected_history_session_id:
             return
         self._session_detail_cache[str(session_id)] = (detail, samples)
+        self._last_chart_source_rows = len(samples)
         self._set_session_detail(detail, samples)
 
     def _on_session_detail_error(self, generation: int, session_id: str, message: str) -> None:
+        if self._closing:
+            return
         if generation != self._history_query_generation or session_id != self._selected_history_session_id:
             return
         if "not found" in message.lower():
@@ -1476,6 +1491,7 @@ class TrafficMonitorWidget(QWidget):
         detail: ProxySessionDetail,
         samples: list[ProxyTrafficSample],
     ) -> None:
+        self._last_chart_rendered_points = min(len(samples), MAX_SESSION_CHART_POINTS)
         labels = self.session_detail_labels
         labels["profile"].setText(detail.profile_name or detail.profile_id or "Unsaved profile")
         labels["start"].setText(format_datetime(detail.started_at))
@@ -1730,6 +1746,8 @@ class TrafficMonitorWidget(QWidget):
         self._start_export(lambda: self._store.export_csv(path, range_days=365))
 
     def _start_export(self, fn: Callable[[], object]) -> None:
+        if self._closing:
+            return
         if self._export_in_flight:
             QMessageBox.information(self, "Export Traffic CSV", "A traffic export is already running.")
             return
@@ -1740,11 +1758,30 @@ class TrafficMonitorWidget(QWidget):
         self._thread_pool.start(worker)
 
     def _on_export_finished(self, _result: object) -> None:
+        if self._closing:
+            return
         self._export_in_flight = False
 
     def _on_export_error(self, message: str) -> None:
+        if self._closing:
+            return
         self._export_in_flight = False
         self.store_error_label.setText(message)
+
+    def shutdown(self) -> None:
+        """Invalidate UI jobs without stopping the independent netmon service."""
+        if self._closing:
+            return
+        self._closing = True
+        self._history_query_generation += 1
+        self._export_in_flight = False
+
+    def performance_snapshot(self) -> dict[str, int | float | None]:
+        return {
+            "history_refresh_last_ms": self._last_history_refresh_ms,
+            "chart_source_rows": self._last_chart_source_rows,
+            "chart_rendered_points": self._last_chart_rendered_points,
+        }
 
     def _on_clear_history_clicked(self) -> None:
         if self._store is None:

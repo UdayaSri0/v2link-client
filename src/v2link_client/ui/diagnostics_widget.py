@@ -54,6 +54,8 @@ class DiagnosticsWidget(QWidget):
         self._socks_port = 1080
         self._http_port = 8080
         self._runtime_state: dict[str, Any] | None = None
+        self._closing = False
+        self._refresh_generation = 0
 
         self.hint_label = QLabel("")
         self.hint_label.setProperty("role", "hint")
@@ -107,23 +109,35 @@ class DiagnosticsWidget(QWidget):
         self._runtime_state = copy.deepcopy(state) if isinstance(state, dict) else None
 
     def refresh(self) -> None:
+        if self._closing:
+            return
+        self._refresh_generation += 1
+        generation = self._refresh_generation
         self.set_hint("")
         self.text_area.setPlainText("Refreshing diagnostics...")
         self.refresh_button.setEnabled(False)
 
         state_snapshot = copy.deepcopy(self._runtime_state)
         worker = DiagnosticsWorker(lambda: collect_diagnostics(state=state_snapshot))
-        worker.signals.result.connect(self._on_result)
-        worker.signals.error.connect(self._on_error)
+        worker.signals.result.connect(lambda text: self._on_result(generation, text))
+        worker.signals.error.connect(lambda message: self._on_error(generation, message))
         self.thread_pool.start(worker)
 
-    def _on_result(self, text: str) -> None:
+    def _on_result(self, generation: int, text: str) -> None:
+        if self._closing or generation != self._refresh_generation:
+            return
         self.text_area.setPlainText(text)
         self.refresh_button.setEnabled(True)
 
-    def _on_error(self, message: str) -> None:
+    def _on_error(self, generation: int, message: str) -> None:
+        if self._closing or generation != self._refresh_generation:
+            return
         self.text_area.setPlainText(f"Diagnostics error: {message}")
         self.refresh_button.setEnabled(True)
+
+    def shutdown(self) -> None:
+        self._closing = True
+        self._refresh_generation += 1
 
     def copy_report(self) -> None:
         text = self.text_area.toPlainText()

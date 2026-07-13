@@ -199,6 +199,35 @@ def test_closing_window_does_not_start_stats_query() -> None:
     assert harness._thread_pool.workers == []
 
 
+def test_expensive_runtime_diagnostics_are_queued_not_run_in_gui_callback() -> None:
+    from v2link_client.ui.main_window import MainWindow
+
+    store = SimpleNamespace(
+        db_path=SimpleNamespace(exists=Mock(return_value=False)),
+        get_history_diagnostics=Mock(),
+        app_tables_present=Mock(),
+        get_session_sample_count=Mock(),
+    )
+    window = SimpleNamespace(
+        _closing=False,
+        _runtime_diagnostics_in_flight=False,
+        _runtime_diagnostics_token=0,
+        _traffic_store=store,
+        _traffic_session_id=None,
+        _listener_reachability=Mock(return_value=(False, False)),
+        _netmon_client=SimpleNamespace(get_status=Mock()),
+        _thread_pool=_CapturingPool(),
+        _on_runtime_diagnostics_result=Mock(),
+        _on_runtime_diagnostics_error=Mock(),
+    )
+
+    MainWindow._kick_runtime_diagnostics_refresh(window)
+
+    assert len(window._thread_pool.workers) == 1
+    window._listener_reachability.assert_not_called()
+    store.get_history_diagnostics.assert_not_called()
+
+
 def test_stale_stats_result_does_not_clear_current_request() -> None:
     harness = _StatsHarness()
     harness._stats_token = 8

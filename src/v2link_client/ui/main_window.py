@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 import socket
 import tempfile
+import threading
 import time
 
 from PyQt6.QtCore import QEvent, QObject, QRunnable, Qt, QThreadPool, QTimer, QUrl, pyqtSignal
@@ -68,7 +69,12 @@ from v2link_client.core.traffic_settings import TrafficSettings, load_traffic_se
 from v2link_client.core.traffic_store import ProxyTrafficSample, TrafficStore
 from v2link_client.core.traffic_storage_worker import TrafficStorageWorker
 from v2link_client.core.update_check import UpdateCheckResult, check_for_updates
-from v2link_client.core.xray_api import TrafficStats, get_outbound_traffic
+from v2link_client.core.xray_api import (
+    TrafficStats,
+    active_stats_query_pid,
+    cancel_active_stats_queries,
+    get_outbound_traffic,
+)
 from v2link_client.core.xray_locator import (
     XrayBinary,
     find_xray_binary as locate_xray_binary,
@@ -93,6 +99,7 @@ PROFILE_KEY_PROFILES_MIGRATED = "profiles_migrated_v1"
 HEALTH_INTERVAL_MS = 5000
 PROXY_AUDIT_INTERVAL_MS = 4000
 PROXY_AUDIT_MAX_BACKOFF_S = 30.0
+PROXY_AUDIT_SHUTDOWN_WAIT_S = 3.5
 STATUS_INTERVAL_MS = 1000
 STATS_INTERVAL_MS = 2000
 TRAFFIC_PERSISTENCE_INTERVAL_MS = 5000
@@ -102,6 +109,10 @@ DIAGNOSTICS_INTERVAL_MS = 30_000
 STATS_QUERY_TIMEOUT_S = 3.0
 SLOW_STATS_CALLBACK_MS = 100.0
 SLOW_STATS_WARNING_INTERVAL_S = 30.0
+SLOW_STATS_QUERY_MS = 500.0
+SLOW_DATABASE_WRITE_MS = 100.0
+SLOW_OVERVIEW_REFRESH_MS = 200.0
+SLOW_HISTORY_REFRESH_MS = 500.0
 RECENT_TRAFFIC_WINDOW_S = 15.0
 WINDOW_GEOMETRY_KEY = "window_geometry_v1"
 WINDOW_MAXIMIZED_KEY = "window_maximized"
@@ -132,6 +143,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self._closing = False
+        self._shutdown_complete = False
         self.setWindowTitle(f"v2link-client v{__version__}")
         self.resize(1180, 760)
         screen = QApplication.primaryScreen()
@@ -352,6 +364,8 @@ class MainWindow(QMainWindow):
         self._proxy_audit_running = False
         self._proxy_audit_token = 0
         self._proxy_audit_active_token: int | None = None
+        self._proxy_audit_finished = threading.Event()
+        self._proxy_audit_finished.set()
         if not self._system_proxy.is_supported():
             self.system_proxy_checkbox.setEnabled(False)
             self.system_proxy_checkbox.setToolTip(
@@ -399,6 +413,20 @@ class MainWindow(QMainWindow):
         self._stats_skipped_polls = 0
         self._stats_query_started_at: float | None = None
         self._last_stats_query_duration_ms: float | None = None
+        self._stats_queries_started = 0
+        self._stats_queries_completed = 0
+        self._stats_query_failures = 0
+        self._stats_query_duration_total_ms = 0.0
+        self._stats_query_duration_max_ms = 0.0
+        self._stats_callback_count = 0
+        self._stats_callback_duration_total_ms = 0.0
+        self._stats_callback_duration_max_ms = 0.0
+        self._last_overview_refresh_ms: float | None = None
+        self._cached_storage_diagnostics: dict[str, object] = {}
+        self._cached_listener_reachability = (False, False)
+        self._cached_netmon_diagnostics: dict[str, object] = {}
+        self._runtime_diagnostics_in_flight = False
+        self._runtime_diagnostics_token = 0
         self._last_stats_failure_log_at: float | None = None
         self._last_stats_failure_message: str | None = None
         self._last_slow_stats_callback_warning_at: float | None = None
@@ -506,6 +534,11 @@ class MainWindow(QMainWindow):
 
         custom_checkbox = QCheckBox("Use custom Xray binary")
         custom_checkbox.setChecked(settings.use_custom_binary)
+        detailed_logging_checkbox = QCheckBox("Enable detailed Xray diagnostic logging")
+        detailed_logging_checkbox.setChecked(settings.detailed_logging)
+        detailed_logging_checkbox.setToolTip(
+            "Adds debug detail to bounded xray_stdout.log; access logging stays disabled."
+        )
         path_input = QLineEdit(settings.custom_binary_path or "")
         path_input.setPlaceholderText("Choose an xray executable")
 
@@ -531,6 +564,7 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(custom_checkbox)
         layout.addLayout(path_row)
+        layout.addWidget(detailed_logging_checkbox)
         layout.addWidget(status_label)
         layout.addLayout(button_row)
 
@@ -581,10 +615,13 @@ class MainWindow(QMainWindow):
                     XraySettings(
                         use_custom_binary=True,
                         custom_binary_path=path_input.text().strip(),
+                        detailed_logging=detailed_logging_checkbox.isChecked(),
                     )
                 )
             else:
-                save_xray_settings(XraySettings())
+                save_xray_settings(
+                    XraySettings(detailed_logging=detailed_logging_checkbox.isChecked())
+                )
                 result = locate_xray_binary()
 
             self._last_xray_resolution = result
@@ -648,6 +685,8 @@ class MainWindow(QMainWindow):
         self._thread_pool.start(worker)
 
     def _on_update_check_result(self, payload: object) -> None:
+        if self._closing:
+            return
         self._set_update_check_busy(False)
         if not isinstance(payload, UpdateCheckResult):  # pragma: no cover - defensive
             self.diagnostics_widget.set_hint("Update check failed: invalid response.")
@@ -675,6 +714,8 @@ class MainWindow(QMainWindow):
         self._show_update_available_dialog(payload)
 
     def _on_update_check_error(self, message: str) -> None:
+        if self._closing:
+            return
         self._set_update_check_busy(False)
         detail = (message or "Unknown error").strip()
         logger.warning("Update check failed: %s", detail)
@@ -853,6 +894,7 @@ class MainWindow(QMainWindow):
             socks_port=socks_port,
             http_port=http_port,
             api_port=api_port,
+            detailed_logging=load_xray_settings().detailed_logging,
         )
         config_path = get_state_dir() / XRAY_CONFIG_FILE
         save_json(config_path, config)
@@ -939,7 +981,11 @@ class MainWindow(QMainWindow):
         parsed_link = parse_link(raw_link)
         socks_port, http_port, api_port = self._pick_proxy_ports()
         config = build_xray_config(
-            parsed_link, socks_port=socks_port, http_port=http_port, api_port=api_port
+            parsed_link,
+            socks_port=socks_port,
+            http_port=http_port,
+            api_port=api_port,
+            detailed_logging=load_xray_settings().detailed_logging,
         )
 
         if persist_runtime_config:
@@ -1150,6 +1196,9 @@ class MainWindow(QMainWindow):
         self._proxy_audit_timer.stop()
         self._health_token += 1
         self._stats_token += 1
+        self._stats_active_token = None
+        self._stats_in_flight = False
+        cancel_active_stats_queries(timeout_s=1.0)
         self._set_health_state("offline", "Not running")
         proxy_note = self._restore_system_proxy()
         self._end_traffic_session(final_stats=self._last_known_stats())
@@ -1174,7 +1223,10 @@ class MainWindow(QMainWindow):
         self._proxy_audit_timer.stop()
         self._health_token += 1
         self._stats_token += 1
+        self._stats_active_token = None
+        self._stats_in_flight = False
         final_stats = self._last_known_stats()
+        cancel_active_stats_queries(timeout_s=1.0)
         try:
             self._process.stop()
         except Exception:  # pragma: no cover - defensive
@@ -1735,14 +1787,16 @@ class MainWindow(QMainWindow):
             self._update_traffic_monitor_diagnostics()
             self.traffic_monitor_widget.refresh_visible_tab(force=True)
         elif current is self.diagnostics_widget:
-            self._update_diagnostics_runtime_state()
+            self._update_diagnostics_runtime_state(expensive=True)
             self.diagnostics_widget.refresh()
 
     def _refresh_scheduled_overview(self) -> None:
         if not self._traffic_monitor_is_visible():
             return
         if self.traffic_monitor_widget.tabs.currentIndex() == 0:
+            started_at = time.monotonic()
             self.traffic_monitor_widget.refresh_overview()
+            self._last_overview_refresh_ms = (time.monotonic() - started_at) * 1000.0
 
     def _refresh_scheduled_diagnostics(self) -> None:
         if self._closing or not self.isVisible() or self.isMinimized():
@@ -1751,11 +1805,11 @@ class MainWindow(QMainWindow):
         if current is self.traffic_monitor_widget:
             if self.traffic_monitor_widget.tabs.currentIndex() != 5:
                 return
-            self._update_diagnostics_runtime_state()
+            self._update_diagnostics_runtime_state(expensive=True)
             self._update_traffic_monitor_diagnostics()
             self.traffic_monitor_widget.refresh_diagnostics()
         elif current is self.diagnostics_widget:
-            self._update_diagnostics_runtime_state()
+            self._update_diagnostics_runtime_state(expensive=True)
             self.diagnostics_widget.refresh()
 
     def _on_traffic_settings_changed(self, settings: object) -> None:
@@ -1808,8 +1862,10 @@ class MainWindow(QMainWindow):
             "socks_port": int(status.socks_port),
         }
 
-    def _update_diagnostics_runtime_state(self) -> None:
-        http_ok, socks_ok = self._listener_reachability()
+    def _update_diagnostics_runtime_state(self, *, expensive: bool = False) -> None:
+        if expensive:
+            self._kick_runtime_diagnostics_refresh()
+        http_ok, socks_ok = self._cached_listener_reachability
         audit = self._last_proxy_audit
         now = time.monotonic()
         xray_resolution = self._current_xray_resolution(refresh=False)
@@ -1819,6 +1875,14 @@ class MainWindow(QMainWindow):
             if self._traffic_storage_worker is not None
             else None
         )
+        storage_diagnostics = self._cached_storage_diagnostics
+        write_metrics = (
+            self._traffic_storage_worker.write_metrics
+            if self._traffic_storage_worker is not None
+            else {}
+        )
+        monitor_metrics = self.traffic_monitor_widget.performance_snapshot()
+        stats_completed = self._stats_queries_completed
 
         desired = self._proxy_status_to_dict(audit.desired if audit is not None else None)
         actual = self._proxy_status_to_dict(audit.actual if audit is not None else None)
@@ -1853,6 +1917,8 @@ class MainWindow(QMainWindow):
             },
             "xray": {
                 "running": bool(self._process.is_running()),
+                "pid": self._process.pid,
+                "stats_query_pid": active_stats_query_pid(),
                 "status": "found" if xray_resolution.valid else "missing",
                 "source": xray_resolution.source,
                 "binary_path": self._process.binary_path,
@@ -1891,7 +1957,7 @@ class MainWindow(QMainWindow):
             },
             "traffic": {
                 "db_path": str(self._traffic_store.db_path) if self._traffic_store is not None else None,
-                "current_session_id": self._traffic_session_id,
+                "current_session_active": self._traffic_session_id is not None,
                 "last_sample_time": (
                     self._last_traffic_sample.timestamp
                     if self._last_traffic_sample is not None
@@ -1921,15 +1987,125 @@ class MainWindow(QMainWindow):
                 "app_tracking_enabled": bool(self._traffic_settings.app_tracking_enabled),
                 "detailed_retention_days": int(self._traffic_settings.detailed_retention_days),
                 "daily_retention_days": int(self._traffic_settings.daily_retention_days),
-                "app_tables_present": (
-                    self._traffic_store.app_tables_present()
-                    if self._traffic_store is not None
-                    else False
+                "app_tables_present": bool(storage_diagnostics.get("app_tables_present", False)),
+                "database_size_bytes": storage_diagnostics.get("db_size_bytes"),
+                "wal_size_bytes": storage_diagnostics.get("wal_size_bytes"),
+                "session_count": storage_diagnostics.get("session_count"),
+                "sample_count": storage_diagnostics.get("sample_count"),
+                "current_session_sample_count": storage_diagnostics.get(
+                    "current_session_sample_count"
                 ),
-                "netmon": asdict(self._netmon_client.get_status()),
+                "diagnostics_error": storage_diagnostics.get("error"),
+                "netmon": self._cached_netmon_diagnostics,
+            },
+            "performance": {
+                "closing": self._closing,
+                "current_runtime_tab": self.runtime_tabs.tabText(self.runtime_tabs.currentIndex()),
+                "current_traffic_tab": self.traffic_monitor_widget.tabs.tabText(
+                    self.traffic_monitor_widget.tabs.currentIndex()
+                ),
+                "stats_interval_ms": STATS_INTERVAL_MS,
+                "stats_in_flight": self._stats_in_flight,
+                "stats_started": self._stats_queries_started,
+                "stats_completed": stats_completed,
+                "stats_skipped": self._stats_skipped_polls,
+                "stats_last_ms": self._last_stats_query_duration_ms,
+                "stats_average_ms": (
+                    self._stats_query_duration_total_ms / stats_completed
+                    if stats_completed
+                    else None
+                ),
+                "stats_max_ms": self._stats_query_duration_max_ms,
+                "stats_failures": self._stats_query_failures,
+                "live_callback_average_ms": (
+                    self._stats_callback_duration_total_ms / self._stats_callback_count
+                    if self._stats_callback_count
+                    else None
+                ),
+                "live_callback_max_ms": self._stats_callback_duration_max_ms,
+                "persistence_interval_ms": TRAFFIC_PERSISTENCE_INTERVAL_MS,
+                "persistence_queue_depth": (
+                    self._traffic_storage_worker.queue_size
+                    if self._traffic_storage_worker is not None
+                    else 0
+                ),
+                "db_write_last_ms": write_metrics.get("last_ms"),
+                "db_write_average_ms": write_metrics.get("average_ms"),
+                "db_write_failures": write_metrics.get("failures", 0),
+                "overview_refresh_last_ms": self._last_overview_refresh_ms,
+                **monitor_metrics,
+                "thresholds_ms": {
+                    "stats_query": SLOW_STATS_QUERY_MS,
+                    "database_write": SLOW_DATABASE_WRITE_MS,
+                    "overview_refresh": SLOW_OVERVIEW_REFRESH_MS,
+                    "history_refresh": SLOW_HISTORY_REFRESH_MS,
+                },
             },
         }
         self.diagnostics_widget.set_runtime_state(state)
+
+    def _kick_runtime_diagnostics_refresh(self) -> None:
+        if self._closing or self._runtime_diagnostics_in_flight:
+            return
+        self._runtime_diagnostics_in_flight = True
+        self._runtime_diagnostics_token += 1
+        token = self._runtime_diagnostics_token
+        store = self._traffic_store
+        session_id = self._traffic_session_id
+
+        def _run():
+            listener_state = self._listener_reachability()
+            try:
+                netmon_state: dict[str, object] = asdict(self._netmon_client.get_status())
+            except Exception as exc:  # pragma: no cover - defensive diagnostics guard
+                netmon_state = {"last_error": str(exc)}
+            storage_state: dict[str, object] = {}
+            if store is not None:
+                try:
+                    history = store.get_history_diagnostics()
+                    db_path = store.db_path
+                    wal_path = Path(f"{db_path}-wal")
+                    storage_state = {
+                        "app_tables_present": store.app_tables_present(),
+                        "db_size_bytes": db_path.stat().st_size if db_path.exists() else 0,
+                        "wal_size_bytes": wal_path.stat().st_size if wal_path.exists() else 0,
+                        "session_count": history.session_count,
+                        "sample_count": history.sample_count,
+                        "current_session_sample_count": (
+                            store.get_session_sample_count(session_id)
+                            if session_id is not None
+                            else 0
+                        ),
+                    }
+                except Exception as exc:  # pragma: no cover - diagnostics remain usable
+                    storage_state = {"error": str(exc)}
+            return token, listener_state, netmon_state, storage_state
+
+        worker = HealthCheckWorker(_run)
+        worker.signals.result.connect(self._on_runtime_diagnostics_result)
+        worker.signals.error.connect(
+            lambda message: self._on_runtime_diagnostics_error(token, message)
+        )
+        self._thread_pool.start(worker)
+
+    def _on_runtime_diagnostics_result(self, payload: object) -> None:
+        token, listener_state, netmon_state, storage_state = payload  # type: ignore[misc]
+        if self._closing or token != self._runtime_diagnostics_token:
+            return
+        self._runtime_diagnostics_in_flight = False
+        self._cached_listener_reachability = listener_state
+        self._cached_netmon_diagnostics = netmon_state
+        self._cached_storage_diagnostics = storage_state
+        self._update_diagnostics_runtime_state()
+        if self.runtime_tabs.currentWidget() is self.diagnostics_widget:
+            self.diagnostics_widget.refresh()
+
+    def _on_runtime_diagnostics_error(self, token: int, message: str) -> None:
+        if self._closing or token != self._runtime_diagnostics_token:
+            return
+        self._runtime_diagnostics_in_flight = False
+        self._cached_storage_diagnostics = {"error": message}
+        self._update_diagnostics_runtime_state()
 
     def _audit_system_proxy_runtime(self) -> None:
         if self._closing or self._proxy_audit_running:
@@ -1939,20 +2115,30 @@ class MainWindow(QMainWindow):
             return
 
         self._proxy_audit_running = True
+        self._proxy_audit_finished.clear()
         token = self._proxy_audit_token
         self._proxy_audit_active_token = token
         now = time.monotonic()
         cfg = self._system_proxy_cfg
+        allow_reconcile = now >= self._next_proxy_reconcile_at
 
         def _run():
             try:
                 audit = self._system_proxy.audit_runtime(cfg, reconcile=False)
                 drift_reason = "; ".join(audit.mismatches)
-                return token, "ok", audit, drift_reason, now
+                reconciled = False
+                if self._closing or token != self._proxy_audit_token:
+                    return token, "stale", audit, drift_reason, False, now
+                if audit.mismatches and allow_reconcile:
+                    audit = self._system_proxy.audit_runtime(cfg, reconcile=True)
+                    reconciled = True
+                return token, "ok", audit, drift_reason, reconciled, now
             except AppError as exc:
-                return token, "error", exc.user_message, True, now
+                return token, "error", exc.user_message, True, False, now
             except Exception as exc:  # pragma: no cover - defensive
-                return token, "error", str(exc), False, now
+                return token, "error", str(exc), False, False, now
+            finally:
+                self._proxy_audit_finished.set()
 
         worker = HealthCheckWorker(_run)
         worker.signals.result.connect(self._on_proxy_audit_result)
@@ -1960,7 +2146,7 @@ class MainWindow(QMainWindow):
         self._thread_pool.start(worker)
 
     def _on_proxy_audit_result(self, payload: object) -> None:
-        token, kind, value, detail, started_at = payload  # type: ignore[misc]
+        token, kind, value, detail, reconciled, started_at = payload  # type: ignore[misc]
         if token != self._proxy_audit_active_token:
             return
         self._proxy_audit_running = False
@@ -1977,20 +2163,7 @@ class MainWindow(QMainWindow):
         self._last_proxy_audit = audit
         self._last_proxy_audit_error = None
         drift_reason = str(detail)
-        if audit.mismatches and time.monotonic() >= self._next_proxy_reconcile_at:
-            try:
-                reconciled = self._system_proxy.audit_runtime(self._system_proxy_cfg, reconcile=True)
-            except AppError as exc:
-                self._handle_proxy_audit_error(
-                    exc.user_message,
-                    expected=True,
-                    now=time.monotonic(),
-                )
-                return
-            except Exception as exc:  # pragma: no cover - defensive
-                self._handle_proxy_audit_error(str(exc), expected=False, now=time.monotonic())
-                return
-            self._last_proxy_audit = reconciled
+        if reconciled:
             self._proxy_audit_failures = 0
             self._next_proxy_reconcile_at = 0.0
             self._last_proxy_reapply_at = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -2000,7 +2173,7 @@ class MainWindow(QMainWindow):
             )
         elif audit.mismatches:
             wait_s = max(0.0, self._next_proxy_reconcile_at - time.monotonic())
-            logger.info("System proxy drift detected, waiting %.1fs before reconcile retry", wait_s)
+            logger.debug("System proxy drift detected, waiting %.1fs before reconcile retry", wait_s)
             self.diagnostics_widget.set_hint(
                 f"System proxy drift detected; retrying auto-reapply in {wait_s:.1f}s."
             )
@@ -2058,6 +2231,7 @@ class MainWindow(QMainWindow):
         self._stats_in_flight = True
         self._stats_active_token = token
         self._stats_query_started_at = time.monotonic()
+        self._stats_queries_started = getattr(self, "_stats_queries_started", 0) + 1
 
         def _run():
             started_at = time.monotonic()
@@ -2101,6 +2275,14 @@ class MainWindow(QMainWindow):
         self._stats_active_token = None
         self._stats_query_started_at = None
         self._last_stats_query_duration_ms = float(duration_ms)
+        self._stats_queries_completed = getattr(self, "_stats_queries_completed", 0) + 1
+        self._stats_query_duration_total_ms = (
+            getattr(self, "_stats_query_duration_total_ms", 0.0) + float(duration_ms)
+        )
+        self._stats_query_duration_max_ms = max(
+            getattr(self, "_stats_query_duration_max_ms", 0.0),
+            float(duration_ms),
+        )
         if token != self._stats_token or self._closing:
             logger.debug("Ignoring stale stats result for generation %s", token)
             return
@@ -2159,6 +2341,14 @@ class MainWindow(QMainWindow):
         self._update_traffic_monitor_diagnostics()
 
         callback_ms = (time.monotonic() - callback_started_at) * 1000.0
+        self._stats_callback_count = getattr(self, "_stats_callback_count", 0) + 1
+        self._stats_callback_duration_total_ms = (
+            getattr(self, "_stats_callback_duration_total_ms", 0.0) + callback_ms
+        )
+        self._stats_callback_duration_max_ms = max(
+            getattr(self, "_stats_callback_duration_max_ms", 0.0),
+            callback_ms,
+        )
         logger.debug("Live stats callback completed in %.1f ms", callback_ms)
         if callback_ms > SLOW_STATS_CALLBACK_MS:
             current = time.monotonic()
@@ -2174,9 +2364,18 @@ class MainWindow(QMainWindow):
         self._stats_active_token = None
         self._stats_query_started_at = None
         self._last_stats_query_duration_ms = float(duration_ms)
+        self._stats_queries_completed = getattr(self, "_stats_queries_completed", 0) + 1
         if token != self._stats_token or self._closing:
             logger.debug("Ignoring stale stats error for generation %s: %s", token, message)
             return
+        self._stats_query_failures = getattr(self, "_stats_query_failures", 0) + 1
+        self._stats_query_duration_total_ms = (
+            getattr(self, "_stats_query_duration_total_ms", 0.0) + float(duration_ms)
+        )
+        self._stats_query_duration_max_ms = max(
+            getattr(self, "_stats_query_duration_max_ms", 0.0),
+            float(duration_ms),
+        )
         # Keep the UI stable; stats may be unavailable if API isn't ready yet.
         now = time.monotonic()
         should_warn = (
@@ -2226,6 +2425,8 @@ class MainWindow(QMainWindow):
         self._thread_pool.start(worker)
 
     def _on_ping_result(self, payload: object) -> None:
+        if self._closing:
+            return
         self._ping_in_flight = False
         self.ping_button.setEnabled(True)
         if not isinstance(payload, ServerPingResult):  # pragma: no cover - defensive
@@ -2245,6 +2446,8 @@ class MainWindow(QMainWindow):
         self.diagnostics_widget.set_hint(f"Ping: {summary}")
 
     def _on_ping_error(self, message: str) -> None:
+        if self._closing:
+            return
         self._ping_in_flight = False
         self.ping_button.setEnabled(True)
         self.diagnostics_widget.set_hint(f"Ping failed: {message}")
@@ -2271,6 +2474,8 @@ class MainWindow(QMainWindow):
         self._thread_pool.start(worker)
 
     def _on_speed_test_result(self, payload: object) -> None:
+        if self._closing:
+            return
         self._speed_test_in_flight = False
         self.speed_test_button.setEnabled(True)
         if not isinstance(payload, SpeedTestResult):  # pragma: no cover - defensive
@@ -2286,6 +2491,8 @@ class MainWindow(QMainWindow):
         self.diagnostics_widget.set_hint(f"Speed test: ↓ {down} / ↑ {up}")
 
     def _on_speed_test_error(self, message: str) -> None:
+        if self._closing:
+            return
         self._speed_test_in_flight = False
         self.speed_test_button.setEnabled(True)
         self.diagnostics_widget.set_hint(f"Speed test failed: {message}")
@@ -2324,11 +2531,10 @@ class MainWindow(QMainWindow):
         self._thread_pool.start(worker)
 
     def _on_health_result(self, payload: object) -> None:
-        self._health_in_flight = False
-
         token, result = payload  # type: ignore[misc]
-        if token != self._health_token:
+        if self._closing or token != self._health_token:
             return
+        self._health_in_flight = False
         if not isinstance(result, ProxyHealthResult):  # pragma: no cover - defensive
             self._last_health_result = None
             self._set_health_state("offline", "Health check error")
@@ -2351,9 +2557,9 @@ class MainWindow(QMainWindow):
         self._last_health_ok = ok_now
 
     def _on_health_error(self, token: int, message: str) -> None:
-        self._health_in_flight = False
-        if token != self._health_token:
+        if self._closing or token != self._health_token:
             return
+        self._health_in_flight = False
         self._last_health_result = None
         self._set_health_state("offline", message)
 
@@ -2378,25 +2584,63 @@ class MainWindow(QMainWindow):
             self.health_label.setStyleSheet("color: #c62828; font-weight: 600;")
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._shutdown_application()
+        super().closeEvent(event)
+
+    def _shutdown_application(self) -> None:
+        """Perform the ordered, idempotent application-owned shutdown."""
+        if self._shutdown_complete:
+            return
         self._closing = True
-        self._status_timer.stop()
-        self._stats_timer.stop()
-        self._traffic_persistence_timer.stop()
-        self._overview_timer.stop()
-        self._diagnostics_timer.stop()
-        self._health_timer.stop()
-        self._proxy_audit_timer.stop()
+        for timer in (
+            self._status_timer,
+            self._stats_timer,
+            self._traffic_persistence_timer,
+            self._overview_timer,
+            self._diagnostics_timer,
+            self._health_timer,
+            self._proxy_audit_timer,
+        ):
+            timer.stop()
         self._stats_token += 1
+        self._health_token += 1
+        self._proxy_audit_token += 1
+        self._runtime_diagnostics_token = getattr(self, "_runtime_diagnostics_token", 0) + 1
+        self._stats_active_token = None
+        self._proxy_audit_active_token = None
+        self._stats_in_flight = False
+        self._health_in_flight = False
+        self._proxy_audit_running = False
+        self._runtime_diagnostics_in_flight = False
         self._save_profile_preferences()
-        if self._process.is_running():
-            self._stop_core(user_message="Stopped (app closed).")
+
+        final_stats = self._last_known_stats()
+        self._end_traffic_session(final_stats=final_stats)
+        self.traffic_monitor_widget.shutdown()
+        self.diagnostics_widget.shutdown()
+
+        cancel_active_stats_queries(timeout_s=1.0)
+        audit_finished = getattr(self, "_proxy_audit_finished", None)
+        if audit_finished is not None and not audit_finished.wait(PROXY_AUDIT_SHUTDOWN_WAIT_S):
+            logger.warning("Proxy audit did not finish before shutdown restore timeout")
+        try:
+            self._process.stop(timeout_s=3.0)
+        except Exception:  # pragma: no cover - defensive shutdown guard
+            logger.exception("Failed to stop app-owned Xray process group")
+        self._restore_system_proxy()
+
+        # Remove queued QRunnables and allow already-running callbacks a short,
+        # bounded window to observe their invalid generation tokens.
+        self._thread_pool.clear()
+        if not self._thread_pool.waitForDone(1500):
+            logger.warning("Background jobs did not finish before shutdown timeout")
         if self._traffic_storage_worker is not None:
             if not self._traffic_storage_worker.shutdown(
                 drain=True,
                 timeout_s=TRAFFIC_FINAL_FLUSH_TIMEOUT_S,
             ):
                 logger.warning("Traffic storage worker did not stop before shutdown timeout")
-        super().closeEvent(event)
+        self._shutdown_complete = True
 
     def _apply_system_proxy(self) -> None:
         if self._system_proxy_applied:
