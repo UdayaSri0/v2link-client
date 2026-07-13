@@ -81,7 +81,7 @@ class _StatsHarness:
         )
 
 
-def test_live_sample_does_not_trigger_complete_or_section_refreshes(tmp_path) -> None:
+def test_live_sample_is_memory_only_and_does_not_trigger_section_refreshes(tmp_path) -> None:
     from v2link_client.core.traffic_settings import TrafficSettings
     from v2link_client.core.traffic_store import TrafficStore
     from v2link_client.ui.main_window import MainWindow
@@ -90,6 +90,7 @@ def test_live_sample_does_not_trigger_complete_or_section_refreshes(tmp_path) ->
     session_id = store.start_proxy_session(
         None, "Unsaved", "fingerprint", _stats(0, 0), "127.0.0.1:10085", 1080, 8080
     )
+    store.record_proxy_sample = Mock()  # type: ignore[method-assign]
     monitor = SimpleNamespace(
         update_live_sample=Mock(),
         refresh=Mock(),
@@ -103,6 +104,13 @@ def test_live_sample_does_not_trigger_complete_or_section_refreshes(tmp_path) ->
         _traffic_session_id=session_id,
         _last_traffic_store_error=None,
         _last_traffic_sample=None,
+        _last_uplink=0,
+        _last_downlink=0,
+        _last_stats_at=None,
+        _traffic_session_uplink_bytes=0,
+        _traffic_session_downlink_bytes=0,
+        _pending_traffic_stats=None,
+        _now_iso_seconds=lambda: "2026-05-01T00:00:00+00:00",
         traffic_monitor_widget=monitor,
         _refresh_traffic_monitor=Mock(),
     )
@@ -110,6 +118,7 @@ def test_live_sample_does_not_trigger_complete_or_section_refreshes(tmp_path) ->
     sample = MainWindow._record_traffic_sample(window, _stats())
 
     assert sample is not None
+    store.record_proxy_sample.assert_not_called()
     monitor.update_live_sample.assert_called_once_with(sample)
     monitor.refresh.assert_not_called()
     monitor.refresh_history.assert_not_called()
