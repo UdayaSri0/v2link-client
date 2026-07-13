@@ -12,6 +12,8 @@ from PyQt6.QtWidgets import QSizePolicy, QWidget
 from v2link_client.core.humanize import format_bytes, format_speed, format_time_only
 from v2link_client.core.traffic_store import DailyUsageBreakdown, ProxyTrafficSample
 
+MAX_SESSION_CHART_POINTS = 900
+SESSION_CHART_MARKER_LIMIT = 120
 
 @dataclass(frozen=True, slots=True)
 class DailyChartPoint:
@@ -26,6 +28,37 @@ class SessionChartPoint:
     label: str
     download_value: float
     upload_value: float
+
+
+def downsample_session_chart_points(
+    points: Iterable[SessionChartPoint],
+    *,
+    maximum_points: int = MAX_SESSION_CHART_POINTS,
+) -> list[SessionChartPoint]:
+    """Min/max bucket a paired series while preserving endpoints and chronological order."""
+    source = list(points)
+    limit = max(2, int(maximum_points))
+    if len(source) <= limit:
+        return source
+
+    # Two extrema per bucket retain peaks from both aligned series. Endpoint indices
+    # are always included and final sorting preserves the original chronology.
+    interior = source[1:-1]
+    bucket_count = max(1, (limit - 2) // 2)
+    selected_indices = {0, len(source) - 1}
+    for bucket in range(bucket_count):
+        start = 1 + (len(interior) * bucket // bucket_count)
+        end = 1 + (len(interior) * (bucket + 1) // bucket_count)
+        if end <= start:
+            continue
+        indices = range(start, end)
+        download_peak = max(indices, key=lambda idx: (source[idx].download_value, -idx))
+        upload_peak = max(range(start, end), key=lambda idx: (source[idx].upload_value, -idx))
+        selected_indices.add(download_peak)
+        selected_indices.add(upload_peak)
+
+    ordered = [source[idx] for idx in sorted(selected_indices)]
+    return ordered[:limit - 1] + [source[-1]] if len(ordered) > limit else ordered
 
 
 def prepare_daily_chart_data(rows: Iterable[DailyUsageBreakdown]) -> list[DailyChartPoint]:
@@ -45,7 +78,7 @@ def prepare_daily_chart_data(rows: Iterable[DailyUsageBreakdown]) -> list[DailyC
 
 
 def prepare_session_speed_chart_data(samples: Iterable[ProxyTrafficSample]) -> list[SessionChartPoint]:
-    return [
+    points = [
         SessionChartPoint(
             label=format_time_only(sample.timestamp),
             download_value=max(0.0, float(sample.download_bps)),
@@ -53,15 +86,25 @@ def prepare_session_speed_chart_data(samples: Iterable[ProxyTrafficSample]) -> l
         )
         for sample in samples
     ]
+    return downsample_session_chart_points(points)
 
 
 def prepare_session_cumulative_chart_data(samples: Iterable[ProxyTrafficSample]) -> list[SessionChartPoint]:
+    source = list(samples)
+    has_stored_totals = any(
+        sample.session_uplink_bytes > 0 or sample.session_downlink_bytes > 0
+        for sample in source
+    )
     download_total = 0
     upload_total = 0
     points: list[SessionChartPoint] = []
-    for sample in samples:
-        download_total += max(0, int(sample.downlink_delta_bytes))
-        upload_total += max(0, int(sample.uplink_delta_bytes))
+    for sample in source:
+        if has_stored_totals:
+            download_total = max(0, int(sample.session_downlink_bytes))
+            upload_total = max(0, int(sample.session_uplink_bytes))
+        else:
+            download_total += max(0, int(sample.downlink_delta_bytes))
+            upload_total += max(0, int(sample.uplink_delta_bytes))
         points.append(
             SessionChartPoint(
                 label=format_time_only(sample.timestamp),
@@ -69,7 +112,7 @@ def prepare_session_cumulative_chart_data(samples: Iterable[ProxyTrafficSample])
                 upload_value=float(upload_total),
             )
         )
-    return points
+    return downsample_session_chart_points(points)
 
 
 class _ChartBase(QWidget):
@@ -229,9 +272,17 @@ class TrafficLineChartWidget(_ChartBase):
         self.set_empty_text("Select a session to view traffic samples.")
 
     def set_data(self, points: Iterable[SessionChartPoint], *, value_kind: str = "speed") -> None:
-        self._points = list(points)
+        self._points = downsample_session_chart_points(points)
         self._value_kind = value_kind if value_kind in {"speed", "bytes"} else "speed"
         self.update()
+
+    @property
+    def points(self) -> tuple[SessionChartPoint, ...]:
+        return tuple(self._points)
+
+    @property
+    def markers_enabled(self) -> bool:
+        return len(self._points) <= SESSION_CHART_MARKER_LIMIT
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
         super().paintEvent(event)
@@ -264,8 +315,9 @@ class TrafficLineChartWidget(_ChartBase):
                 current = map_point(idx, float(getattr(point, attr)))
                 if previous is not None:
                     painter.drawLine(previous, current)
-                painter.setBrush(colors[key])
-                painter.drawEllipse(current, 2.4, 2.4)
+                if self.markers_enabled:
+                    painter.setBrush(colors[key])
+                    painter.drawEllipse(current, 2.4, 2.4)
                 previous = current
 
         painter.setPen(colors["muted"])

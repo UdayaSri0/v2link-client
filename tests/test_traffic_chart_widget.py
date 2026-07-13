@@ -120,8 +120,8 @@ def test_downsampling_bounds_large_series_and_preserves_endpoints(count: int) ->
     assert len(points) <= MAX_SESSION_CHART_POINTS
     assert points[0].label == prepare_session_speed_chart_data(source[:1])[0].label
     assert points[-1].label == prepare_session_speed_chart_data(source[-1:])[0].label
-    labels = [point.label for point in points]
-    assert labels == sorted(labels)
+    values = [point.upload_value for point in points]
+    assert values == sorted(values)
 
 
 def test_downsampling_preserves_upload_and_download_peaks_in_order() -> None:
