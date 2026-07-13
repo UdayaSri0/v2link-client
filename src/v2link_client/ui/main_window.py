@@ -92,6 +92,13 @@ PROFILE_KEY_PROFILES_MIGRATED = "profiles_migrated_v1"
 HEALTH_INTERVAL_MS = 5000
 PROXY_AUDIT_INTERVAL_MS = 4000
 PROXY_AUDIT_MAX_BACKOFF_S = 30.0
+STATUS_INTERVAL_MS = 1000
+STATS_INTERVAL_MS = 2000
+OVERVIEW_INTERVAL_MS = 10_000
+DIAGNOSTICS_INTERVAL_MS = 30_000
+STATS_QUERY_TIMEOUT_S = 3.0
+SLOW_STATS_CALLBACK_MS = 100.0
+SLOW_STATS_WARNING_INTERVAL_S = 30.0
 RECENT_TRAFFIC_WINDOW_S = 15.0
 WINDOW_GEOMETRY_KEY = "window_geometry_v1"
 WINDOW_MAXIMIZED_KEY = "window_maximized"
@@ -121,6 +128,7 @@ class HealthCheckWorker(QRunnable):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        self._closing = False
         self.setWindowTitle(f"v2link-client v{__version__}")
         self.resize(1180, 760)
         screen = QApplication.primaryScreen()
@@ -292,6 +300,7 @@ class MainWindow(QMainWindow):
         self.runtime_tabs = QTabWidget()
         self.runtime_tabs.addTab(self.traffic_monitor_widget, "Traffic Monitor")
         self.runtime_tabs.addTab(self.diagnostics_widget, "Diagnostics")
+        self.runtime_tabs.currentChanged.connect(self._on_runtime_tab_changed)
 
         layout = QVBoxLayout()
         layout.setContentsMargins(16, 16, 16, 16)
@@ -333,6 +342,8 @@ class MainWindow(QMainWindow):
         self._proxy_audit_failures = 0
         self._next_proxy_reconcile_at = 0.0
         self._proxy_audit_running = False
+        self._proxy_audit_token = 0
+        self._proxy_audit_active_token: int | None = None
         if not self._system_proxy.is_supported():
             self.system_proxy_checkbox.setEnabled(False)
             self.system_proxy_checkbox.setToolTip(
@@ -354,12 +365,31 @@ class MainWindow(QMainWindow):
         self._proxy_audit_timer.timeout.connect(self._audit_system_proxy_runtime)
 
         self._status_timer = QTimer(self)
-        self._status_timer.setInterval(1000)
+        self._status_timer.setInterval(STATUS_INTERVAL_MS)
         self._status_timer.timeout.connect(self._poll_core_status)
+
+        self._stats_timer = QTimer(self)
+        self._stats_timer.setInterval(STATS_INTERVAL_MS)
+        self._stats_timer.timeout.connect(self._kick_stats_poll)
+
+        self._overview_timer = QTimer(self)
+        self._overview_timer.setInterval(OVERVIEW_INTERVAL_MS)
+        self._overview_timer.timeout.connect(self._refresh_scheduled_overview)
+
+        self._diagnostics_timer = QTimer(self)
+        self._diagnostics_timer.setInterval(DIAGNOSTICS_INTERVAL_MS)
+        self._diagnostics_timer.timeout.connect(self._refresh_scheduled_diagnostics)
 
         self._core_started_at: float | None = None
         self._stats_in_flight = False
         self._stats_token = 0
+        self._stats_active_token: int | None = None
+        self._stats_skipped_polls = 0
+        self._stats_query_started_at: float | None = None
+        self._last_stats_query_duration_ms: float | None = None
+        self._last_stats_failure_log_at: float | None = None
+        self._last_stats_failure_message: str | None = None
+        self._last_slow_stats_callback_warning_at: float | None = None
         self._last_stats_at: float | None = None
         self._last_uplink: int | None = None
         self._last_downlink: int | None = None
@@ -398,6 +428,8 @@ class MainWindow(QMainWindow):
         except Exception:
             logger.exception("Failed to auto-repair stale loopback proxy settings")
         self._update_diagnostics_runtime_state()
+        self._overview_timer.start()
+        self._diagnostics_timer.start()
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -1071,15 +1103,17 @@ class MainWindow(QMainWindow):
             )
         self._update_diagnostics_runtime_state()
         self._status_timer.start()
+        self._stats_timer.start()
+        self._kick_stats_poll()
 
     def _poll_core_status(self) -> None:
         if self._process.is_running():
             self._update_uptime()
-            self._kick_stats_poll()
             return
 
         code = self._process.returncode()
         self._status_timer.stop()
+        self._stats_timer.stop()
         self.status_label.setText("STOPPED")
         self.start_stop_button.setText("Start")
         self.start_stop_button.setProperty("variant", "primary")
@@ -1113,6 +1147,7 @@ class MainWindow(QMainWindow):
 
     def _stop_core(self, *, user_message: str) -> None:
         self._status_timer.stop()
+        self._stats_timer.stop()
         self._health_timer.stop()
         self._proxy_audit_timer.stop()
         self._health_token += 1
@@ -1555,24 +1590,22 @@ class MainWindow(QMainWindow):
         self._refresh_traffic_monitor()
 
     def _record_traffic_sample(self, stats: TrafficStats) -> ProxyTrafficSample | None:
+        # Hot path: stats timer -> worker -> _on_stats_result -> this bounded write -> live labels.
+        # Overview/history/app/profile/diagnostic reads are deliberately scheduled elsewhere.
         if not self._traffic_settings.proxy_history_enabled:
-            self._refresh_traffic_monitor()
             return None
         if self._traffic_store is None or self._traffic_session_id is None:
-            self._refresh_traffic_monitor()
             return None
         try:
             sample = self._traffic_store.record_proxy_sample(self._traffic_session_id, stats)
         except Exception as exc:  # pragma: no cover - defensive persistence guard
             logger.exception("Failed to record traffic sample")
             self._last_traffic_store_error = str(exc)
-            self._refresh_traffic_monitor()
             return None
 
         self._last_traffic_store_error = None
         self._last_traffic_sample = sample
         self.traffic_monitor_widget.update_live_sample(sample)
-        self._refresh_traffic_monitor()
         return sample
 
     def _end_traffic_session(self, *, final_stats: TrafficStats | None = None) -> None:
@@ -1591,6 +1624,13 @@ class MainWindow(QMainWindow):
     def _refresh_traffic_monitor(self) -> None:
         if not hasattr(self, "traffic_monitor_widget"):
             return
+        self._update_traffic_monitor_diagnostics()
+        if self._traffic_monitor_is_visible():
+            self.traffic_monitor_widget.refresh_visible_tab(force=True)
+
+    def _update_traffic_monitor_diagnostics(self) -> None:
+        if not hasattr(self, "traffic_monitor_widget"):
+            return
         warning = None
         if self._last_traffic_sample is not None and self._last_traffic_sample.warning:
             warning = self._last_traffic_sample.warning
@@ -1606,7 +1646,45 @@ class MainWindow(QMainWindow):
             warning=warning,
             store_error=self._last_traffic_store_error,
         )
-        self.traffic_monitor_widget.refresh()
+
+    def _traffic_monitor_is_visible(self) -> bool:
+        return bool(
+            not self._closing
+            and self.isVisible()
+            and not self.isMinimized()
+            and self.runtime_tabs.currentWidget() is self.traffic_monitor_widget
+        )
+
+    def _on_runtime_tab_changed(self, _index: int) -> None:
+        if self._closing or not self.isVisible() or self.isMinimized():
+            return
+        current = self.runtime_tabs.currentWidget()
+        if current is self.traffic_monitor_widget:
+            self._update_traffic_monitor_diagnostics()
+            self.traffic_monitor_widget.refresh_visible_tab(force=True)
+        elif current is self.diagnostics_widget:
+            self._update_diagnostics_runtime_state()
+            self.diagnostics_widget.refresh()
+
+    def _refresh_scheduled_overview(self) -> None:
+        if not self._traffic_monitor_is_visible():
+            return
+        if self.traffic_monitor_widget.tabs.currentIndex() == 0:
+            self.traffic_monitor_widget.refresh_overview()
+
+    def _refresh_scheduled_diagnostics(self) -> None:
+        if self._closing or not self.isVisible() or self.isMinimized():
+            return
+        current = self.runtime_tabs.currentWidget()
+        if current is self.traffic_monitor_widget:
+            if self.traffic_monitor_widget.tabs.currentIndex() != 5:
+                return
+            self._update_diagnostics_runtime_state()
+            self._update_traffic_monitor_diagnostics()
+            self.traffic_monitor_widget.refresh_diagnostics()
+        elif current is self.diagnostics_widget:
+            self._update_diagnostics_runtime_state()
+            self.diagnostics_widget.refresh()
 
     def _on_traffic_settings_changed(self, settings: object) -> None:
         if not isinstance(settings, TrafficSettings):
@@ -1708,6 +1786,9 @@ class MainWindow(QMainWindow):
                 "stats_api_server": self._traffic_api_server(),
                 "last_stats_query_result": self._last_stats_query_result,
                 "last_stats_query_time": self._last_stats_query_time,
+                "last_stats_query_duration_ms": self._last_stats_query_duration_ms,
+                "stats_query_in_flight": self._stats_in_flight,
+                "stats_skipped_polls": self._stats_skipped_polls,
                 "health_state": self._health_state,
                 "health_detail": self._health_detail,
                 "health_checked_url": (
@@ -1750,70 +1831,105 @@ class MainWindow(QMainWindow):
         self.diagnostics_widget.set_runtime_state(state)
 
     def _audit_system_proxy_runtime(self) -> None:
-        if self._proxy_audit_running:
+        if self._closing or self._proxy_audit_running:
             return
         if not self._process.is_running() or not self._system_proxy_applied or self._system_proxy_cfg is None:
             self._proxy_audit_timer.stop()
-            self._update_diagnostics_runtime_state()
             return
 
         self._proxy_audit_running = True
+        token = self._proxy_audit_token
+        self._proxy_audit_active_token = token
         now = time.monotonic()
-        try:
-            audit = self._system_proxy.audit_runtime(self._system_proxy_cfg, reconcile=False)
-            self._last_proxy_audit = audit
-            self._last_proxy_audit_error = None
+        cfg = self._system_proxy_cfg
 
-            if audit.mismatches:
-                if now < self._next_proxy_reconcile_at:
-                    wait_s = max(0.0, self._next_proxy_reconcile_at - now)
-                    logger.info(
-                        "System proxy drift detected, waiting %.1fs before reconcile retry",
-                        wait_s,
-                    )
-                    self.diagnostics_widget.set_hint(
-                        f"System proxy drift detected; retrying auto-reapply in {wait_s:.1f}s."
-                    )
-                else:
-                    drift_reason = "; ".join(audit.mismatches)
-                    reconciled = self._system_proxy.audit_runtime(self._system_proxy_cfg, reconcile=True)
-                    self._last_proxy_audit = reconciled
-                    self._proxy_audit_failures = 0
-                    self._next_proxy_reconcile_at = 0.0
-                    self._last_proxy_reapply_at = time.strftime("%Y-%m-%d %H:%M:%S")
-                    self._last_proxy_reapply_reason = drift_reason
-                    self.diagnostics_widget.set_hint(
-                        f"System proxy drift detected and auto-reapplied ({drift_reason})."
-                    )
-            else:
-                self._proxy_audit_failures = 0
-                self._next_proxy_reconcile_at = 0.0
-        except AppError as exc:
-            self._last_proxy_audit_error = exc.user_message
-            self._proxy_audit_failures += 1
-            backoff = min(PROXY_AUDIT_MAX_BACKOFF_S, float(2 ** min(self._proxy_audit_failures, 5)))
-            self._next_proxy_reconcile_at = now + backoff
-            logger.warning(
-                "System proxy audit failed (attempt %s, backoff %.1fs): %s",
-                self._proxy_audit_failures,
-                backoff,
-                exc.user_message,
-            )
+        def _run():
+            try:
+                audit = self._system_proxy.audit_runtime(cfg, reconcile=False)
+                drift_reason = "; ".join(audit.mismatches)
+                return token, "ok", audit, drift_reason, now
+            except AppError as exc:
+                return token, "error", exc.user_message, True, now
+            except Exception as exc:  # pragma: no cover - defensive
+                return token, "error", str(exc), False, now
+
+        worker = HealthCheckWorker(_run)
+        worker.signals.result.connect(self._on_proxy_audit_result)
+        worker.signals.error.connect(lambda message: self._on_proxy_audit_worker_error(token, message))
+        self._thread_pool.start(worker)
+
+    def _on_proxy_audit_result(self, payload: object) -> None:
+        token, kind, value, detail, started_at = payload  # type: ignore[misc]
+        if token != self._proxy_audit_active_token:
+            return
+        self._proxy_audit_running = False
+        self._proxy_audit_active_token = None
+        if self._closing or token != self._proxy_audit_token:
+            return
+        if not self._process.is_running() or not self._system_proxy_applied or self._system_proxy_cfg is None:
+            return
+        if kind == "error":
+            self._handle_proxy_audit_error(str(value), expected=bool(detail), now=float(started_at))
+            return
+
+        audit = value
+        self._last_proxy_audit = audit
+        self._last_proxy_audit_error = None
+        drift_reason = str(detail)
+        if audit.mismatches and time.monotonic() >= self._next_proxy_reconcile_at:
+            try:
+                reconciled = self._system_proxy.audit_runtime(self._system_proxy_cfg, reconcile=True)
+            except AppError as exc:
+                self._handle_proxy_audit_error(
+                    exc.user_message,
+                    expected=True,
+                    now=time.monotonic(),
+                )
+                return
+            except Exception as exc:  # pragma: no cover - defensive
+                self._handle_proxy_audit_error(str(exc), expected=False, now=time.monotonic())
+                return
+            self._last_proxy_audit = reconciled
+            self._proxy_audit_failures = 0
+            self._next_proxy_reconcile_at = 0.0
+            self._last_proxy_reapply_at = time.strftime("%Y-%m-%d %H:%M:%S")
+            self._last_proxy_reapply_reason = drift_reason
             self.diagnostics_widget.set_hint(
-                f"System proxy drift detected, but auto-reapply failed: {exc.user_message}"
+                f"System proxy drift detected and auto-reapplied ({drift_reason})."
             )
-        except Exception as exc:  # pragma: no cover - defensive
-            self._last_proxy_audit_error = str(exc)
-            self._proxy_audit_failures += 1
-            backoff = min(PROXY_AUDIT_MAX_BACKOFF_S, float(2 ** min(self._proxy_audit_failures, 5)))
-            self._next_proxy_reconcile_at = now + backoff
-            logger.exception("System proxy runtime audit failed")
+        elif audit.mismatches:
+            wait_s = max(0.0, self._next_proxy_reconcile_at - time.monotonic())
+            logger.info("System proxy drift detected, waiting %.1fs before reconcile retry", wait_s)
             self.diagnostics_widget.set_hint(
-                "System proxy drift detected, but auto-reapply hit an unexpected error."
+                f"System proxy drift detected; retrying auto-reapply in {wait_s:.1f}s."
             )
-        finally:
-            self._proxy_audit_running = False
-            self._update_diagnostics_runtime_state()
+        else:
+            self._proxy_audit_failures = 0
+            self._next_proxy_reconcile_at = 0.0
+
+    def _on_proxy_audit_worker_error(self, token: int, message: str) -> None:
+        if token != self._proxy_audit_active_token:
+            return
+        self._proxy_audit_running = False
+        self._proxy_audit_active_token = None
+        if not self._closing and token == self._proxy_audit_token:
+            self._handle_proxy_audit_error(message, expected=False, now=time.monotonic())
+
+    def _handle_proxy_audit_error(self, message: str, *, expected: bool, now: float) -> None:
+        self._last_proxy_audit_error = message
+        self._proxy_audit_failures += 1
+        backoff = min(PROXY_AUDIT_MAX_BACKOFF_S, float(2 ** min(self._proxy_audit_failures, 5)))
+        self._next_proxy_reconcile_at = now + backoff
+        logger.warning(
+            "System proxy audit failed (attempt %s, backoff %.1fs): %s",
+            self._proxy_audit_failures,
+            backoff,
+            message,
+        )
+        suffix = message if expected else "an unexpected error"
+        self.diagnostics_widget.set_hint(
+            f"System proxy drift detected, but auto-reapply failed: {suffix}."
+        )
 
     def _update_uptime(self) -> None:
         if self._core_started_at is None:
@@ -1824,7 +1940,11 @@ class MainWindow(QMainWindow):
         )
 
     def _kick_stats_poll(self) -> None:
+        if self._closing:
+            return
         if self._stats_in_flight:
+            self._stats_skipped_polls += 1
+            logger.debug("Skipping stats poll while request is in flight (skipped=%s)", self._stats_skipped_polls)
             return
         if self._api_port is None:
             return
@@ -1835,20 +1955,53 @@ class MainWindow(QMainWindow):
         api_server = f"{DEFAULT_LISTEN}:{self._api_port}"
         xray_path = self._process.binary.path
         self._stats_in_flight = True
+        self._stats_active_token = token
+        self._stats_query_started_at = time.monotonic()
 
         def _run():
-            stats = get_outbound_traffic(xray_path, server=api_server)
-            return token, time.monotonic(), stats
+            started_at = time.monotonic()
+            try:
+                stats = get_outbound_traffic(
+                    xray_path,
+                    server=api_server,
+                    timeout_s=STATS_QUERY_TIMEOUT_S,
+                )
+            except Exception as exc:
+                finished_at = time.monotonic()
+                return token, finished_at, (finished_at - started_at) * 1000.0, exc
+            finished_at = time.monotonic()
+            return token, finished_at, (finished_at - started_at) * 1000.0, stats
 
         worker = HealthCheckWorker(_run)
-        worker.signals.result.connect(self._on_stats_result)
-        worker.signals.error.connect(lambda msg: self._on_stats_error(token, msg))
+        worker.signals.result.connect(self._on_stats_worker_finished)
+        worker.signals.error.connect(
+            lambda msg: self._on_stats_error(
+                token,
+                msg,
+                max(0.0, (time.monotonic() - (self._stats_query_started_at or time.monotonic())) * 1000.0),
+            )
+        )
         self._thread_pool.start(worker)
 
+    def _on_stats_worker_finished(self, payload: object) -> None:
+        token, _now, duration_ms, result = payload  # type: ignore[misc]
+        if isinstance(result, Exception):
+            message = result.user_message if isinstance(result, AppError) else str(result)
+            self._on_stats_error(int(token), message, float(duration_ms))
+            return
+        self._on_stats_result(payload)
+
     def _on_stats_result(self, payload: object) -> None:
+        callback_started_at = time.monotonic()
+        token, now, duration_ms, stats = payload  # type: ignore[misc]
+        if token != self._stats_active_token:
+            return
         self._stats_in_flight = False
-        token, now, stats = payload  # type: ignore[misc]
-        if token != self._stats_token:
+        self._stats_active_token = None
+        self._stats_query_started_at = None
+        self._last_stats_query_duration_ms = float(duration_ms)
+        if token != self._stats_token or self._closing:
+            logger.debug("Ignoring stale stats result for generation %s", token)
             return
         if not isinstance(stats, TrafficStats):  # pragma: no cover - defensive
             return
@@ -1858,6 +2011,12 @@ class MainWindow(QMainWindow):
             f"ok: uplink={stats.uplink_bytes} downlink={stats.downlink_bytes}"
         )
         self._last_stats_query_time = self._now_iso_seconds()
+        logger.debug(
+            "Stats poll succeeded in %.1f ms (uplink=%s downlink=%s)",
+            duration_ms,
+            stats.uplink_bytes,
+            stats.downlink_bytes,
+        )
         traffic_sample = self._record_traffic_sample(stats)
 
         self.traffic_label.setText(
@@ -1867,6 +2026,8 @@ class MainWindow(QMainWindow):
         # Speed = delta bytes / delta time.
         up_delta = 0
         down_delta = 0
+        up_bps = 0.0
+        down_bps = 0.0
         if self._last_stats_at is not None and self._last_uplink is not None and self._last_downlink is not None:
             dt = max(0.001, float(now) - float(self._last_stats_at))
             up_delta = int(stats.uplink_bytes - self._last_uplink)
@@ -1886,19 +2047,52 @@ class MainWindow(QMainWindow):
         self._last_stats_at = float(now)
         self._last_uplink = int(stats.uplink_bytes)
         self._last_downlink = int(stats.downlink_bytes)
-        self._update_diagnostics_runtime_state()
+        if traffic_sample is None:
+            self.traffic_monitor_widget.update_live_metrics(
+                upload_bps=up_bps,
+                download_bps=down_bps,
+                session_uplink_bytes=stats.uplink_bytes,
+                session_downlink_bytes=stats.downlink_bytes,
+                last_stats_timestamp=self._last_stats_query_time,
+            )
+        self._update_traffic_monitor_diagnostics()
 
-    def _on_stats_error(self, token: int, message: str) -> None:
+        callback_ms = (time.monotonic() - callback_started_at) * 1000.0
+        logger.debug("Live stats callback completed in %.1f ms", callback_ms)
+        if callback_ms > SLOW_STATS_CALLBACK_MS:
+            current = time.monotonic()
+            last_warning = self._last_slow_stats_callback_warning_at
+            if last_warning is None or current - last_warning >= SLOW_STATS_WARNING_INTERVAL_S:
+                logger.warning("Live stats callback took %.1f ms", callback_ms)
+                self._last_slow_stats_callback_warning_at = current
+
+    def _on_stats_error(self, token: int, message: str, duration_ms: float = 0.0) -> None:
+        if token != self._stats_active_token:
+            return
         self._stats_in_flight = False
-        if token != self._stats_token:
+        self._stats_active_token = None
+        self._stats_query_started_at = None
+        self._last_stats_query_duration_ms = float(duration_ms)
+        if token != self._stats_token or self._closing:
+            logger.debug("Ignoring stale stats error for generation %s: %s", token, message)
             return
         # Keep the UI stable; stats may be unavailable if API isn't ready yet.
-        logger.info("Stats poll failed: %s", message)
+        now = time.monotonic()
+        should_warn = (
+            message != self._last_stats_failure_message
+            or self._last_stats_failure_log_at is None
+            or now - self._last_stats_failure_log_at >= 30.0
+        )
+        if should_warn:
+            logger.warning("Stats poll failed after %.1f ms: %s", duration_ms, message)
+            self._last_stats_failure_log_at = now
+            self._last_stats_failure_message = message
+        else:
+            logger.debug("Stats poll still failing after %.1f ms: %s", duration_ms, message)
         self._stats_available = False
         self._last_stats_query_result = message
         self._last_stats_query_time = self._now_iso_seconds()
-        self._refresh_traffic_monitor()
-        self._update_diagnostics_runtime_state()
+        self._update_traffic_monitor_diagnostics()
 
     def _now_iso_seconds(self) -> str:
         return datetime.now().astimezone().isoformat(timespec="seconds")
@@ -2054,7 +2248,6 @@ class MainWindow(QMainWindow):
                 f"Connectivity went offline: {result.error or 'unknown error'}"
             )
         self._last_health_ok = ok_now
-        self._update_diagnostics_runtime_state()
 
     def _on_health_error(self, token: int, message: str) -> None:
         self._health_in_flight = False
@@ -2062,7 +2255,6 @@ class MainWindow(QMainWindow):
             return
         self._last_health_result = None
         self._set_health_state("offline", message)
-        self._update_diagnostics_runtime_state()
 
     def _set_health_state(self, state: str, detail: str) -> None:
         state = state.lower()
@@ -2085,6 +2277,14 @@ class MainWindow(QMainWindow):
             self.health_label.setStyleSheet("color: #c62828; font-weight: 600;")
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._closing = True
+        self._status_timer.stop()
+        self._stats_timer.stop()
+        self._overview_timer.stop()
+        self._diagnostics_timer.stop()
+        self._health_timer.stop()
+        self._proxy_audit_timer.stop()
+        self._stats_token += 1
         self._save_profile_preferences()
         if self._process.is_running():
             self._stop_core(user_message="Stopped (app closed).")
@@ -2123,6 +2323,7 @@ class MainWindow(QMainWindow):
         self._last_proxy_reapply_reason = None
         self._proxy_audit_failures = 0
         self._next_proxy_reconcile_at = 0.0
+        self._proxy_audit_token += 1
         self._proxy_audit_timer.start()
         self._audit_system_proxy_runtime()
         self.diagnostics_widget.set_hint(
@@ -2137,6 +2338,7 @@ class MainWindow(QMainWindow):
         if not self._system_proxy_applied:
             return None
         self._proxy_audit_timer.stop()
+        self._proxy_audit_token += 1
         restore_note: str | None = None
         try:
             status = self._system_proxy.restore_if_owned()

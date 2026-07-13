@@ -185,9 +185,9 @@ class TrafficMonitorWidget(QWidget):
         layout.addLayout(notice_row)
         layout.addWidget(self.tabs, 1)
         self.setLayout(layout)
-        self.tabs.currentChanged.connect(lambda _idx: self._save_layout_state())
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         self._apply_responsive_layout()
-        self.refresh()
+        self.refresh_overview()
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -195,7 +195,7 @@ class TrafficMonitorWidget(QWidget):
 
     def set_store(self, store: TrafficStore | None) -> None:
         self._store = store
-        self.refresh()
+        self.refresh_visible_tab()
 
     @property
     def settings(self) -> TrafficSettings:
@@ -204,39 +204,60 @@ class TrafficMonitorWidget(QWidget):
     def set_settings(self, settings: TrafficSettings) -> None:
         self._settings = settings
         self._sync_settings_controls()
-        self.refresh()
+        self.refresh_visible_tab()
 
     def set_netmon_client(self, client: NetmonClient) -> None:
         self._netmon_client = client
-        self.refresh()
+        self.refresh_visible_tab()
 
     def set_current_session(self, session_id: str | None) -> None:
         self._current_session_id = session_id
         if session_id is None:
             self._last_live_sample = None
         self.session_id_label.setText(session_id or "none")
-        self.refresh()
 
     def update_live_sample(self, sample: ProxyTrafficSample | None) -> None:
         if sample is None:
             self._last_live_sample = None
-            self.live_upload_label.setText("0.0 Mbps")
-            self.live_download_label.setText("0.0 Mbps")
-            self.live_total_label.setText("0.0 Mbps")
+            self.update_live_metrics(
+                upload_bps=0.0,
+                download_bps=0.0,
+                session_uplink_bytes=0,
+                session_downlink_bytes=0,
+                last_stats_timestamp=None,
+            )
             return
 
         self._last_live_sample = sample
         session_up = sample.session_uplink_bytes if sample.session_uplink_bytes else sample.uplink_bytes
         session_down = sample.session_downlink_bytes if sample.session_downlink_bytes else sample.downlink_bytes
-        self.session_upload_label.setText(format_bytes(session_up))
-        self.session_download_label.setText(format_bytes(session_down))
-        self.session_total_label.setText(format_bytes(session_up + session_down))
-        self.live_upload_label.setText(format_mbps(sample.upload_bps))
-        self.live_download_label.setText(format_mbps(sample.download_bps))
-        self.live_total_label.setText(format_mbps(sample.upload_bps + sample.download_bps))
-        self.last_sample_label.setText(sample.timestamp)
+        self.update_live_metrics(
+            upload_bps=sample.upload_bps,
+            download_bps=sample.download_bps,
+            session_uplink_bytes=session_up,
+            session_downlink_bytes=session_down,
+            last_stats_timestamp=sample.timestamp,
+        )
         if sample.warning:
             self.set_warning(sample.warning)
+
+    def update_live_metrics(
+        self,
+        *,
+        upload_bps: float,
+        download_bps: float,
+        session_uplink_bytes: int,
+        session_downlink_bytes: int,
+        last_stats_timestamp: str | None,
+    ) -> None:
+        """Update only the live labels; this method never reads from storage."""
+        self.session_upload_label.setText(format_bytes(session_uplink_bytes))
+        self.session_download_label.setText(format_bytes(session_downlink_bytes))
+        self.session_total_label.setText(format_bytes(session_uplink_bytes + session_downlink_bytes))
+        self.live_upload_label.setText(format_mbps(upload_bps))
+        self.live_download_label.setText(format_mbps(download_bps))
+        self.live_total_label.setText(format_mbps(upload_bps + download_bps))
+        self.last_sample_label.setText(last_stats_timestamp or "none")
 
     def set_diagnostics(
         self,
@@ -407,36 +428,91 @@ class TrafficMonitorWidget(QWidget):
         if right_sizes:
             self.history_right_splitter.setSizes(right_sizes)
 
+    def _on_tab_changed(self, _index: int) -> None:
+        self._save_layout_state()
+        self.refresh_visible_tab()
+
+    def refresh_visible_tab(self, *, force: bool = False) -> None:
+        """Refresh only the active section, and never refresh a hidden monitor automatically."""
+        if not force and not self.isVisible():
+            return
+        refreshers = {
+            0: self.refresh_overview,
+            1: self.refresh_applications,
+            2: self.refresh_profiles,
+            3: self.refresh_history,
+            5: self.refresh_diagnostics,
+        }
+        refresher = refreshers.get(self.tabs.currentIndex())
+        if refresher is not None:
+            refresher()
+
     def refresh(self) -> None:
-        self._refresh_netmon_status()
+        """Explicit full refresh retained for settings changes and compatibility."""
+        self.refresh_overview()
+        self.refresh_applications()
+        self.refresh_profiles()
+        self.refresh_history()
+        self.refresh_diagnostics()
+
+    def refresh_overview(self) -> None:
         if self._store is None:
-            self.db_path_label.setText("unavailable")
-            self.app_tables_label.setText("unknown")
             return
         try:
+            today = self._store.get_today_summary()
+            month = self._store.get_month_summary()
+            self._set_today_summary(today)
+            self._set_month_summary(month)
+            self._populate_current_session_from_samples()
+            self._populate_overview_recent_sessions()
+        except Exception as exc:  # pragma: no cover - defensive UI guard
+            logger.exception("Failed to refresh traffic overview")
+            self.store_error_label.setText(str(exc))
+
+    def refresh_applications(self) -> None:
+        try:
+            self._refresh_netmon_status()
+            self._populate_applications()
+        except Exception as exc:  # pragma: no cover - defensive UI guard
+            logger.exception("Failed to refresh traffic applications")
+            self.store_error_label.setText(str(exc))
+
+    def refresh_profiles(self) -> None:
+        try:
+            self._populate_profiles()
+        except Exception as exc:  # pragma: no cover - defensive UI guard
+            logger.exception("Failed to refresh traffic profiles")
+            self.store_error_label.setText(str(exc))
+
+    def refresh_history(self) -> None:
+        try:
+            self._populate_history()
+        except Exception as exc:  # pragma: no cover - defensive UI guard
+            logger.exception("Failed to refresh traffic history")
+            self.store_error_label.setText(str(exc))
+
+    def refresh_diagnostics(self) -> None:
+        try:
+            self._refresh_netmon_status()
+            if self._store is None:
+                self.db_path_label.setText("unavailable")
+                self.db_writable_label.setText("no")
+                self.app_tables_label.setText("unknown")
+                return
             db_path_text = str(self._store.db_path)
             self.db_path_label.setText(_elide_middle(db_path_text))
             self.db_path_label.setToolTip(db_path_text)
             self.db_writable_label.setText("yes" if self._db_writable() else "no")
             self.app_tables_label.setText("yes" if self._store.app_tables_present() else "no")
-            today = self._store.get_today_summary()
-            month = self._store.get_month_summary()
-            self._set_today_summary(today)
-            self._set_month_summary(month)
-            self._populate_applications()
-            self._populate_profiles()
-            self._populate_history()
-            self._populate_current_session_from_samples()
-            self._populate_overview_recent_sessions()
             self._populate_history_diagnostics()
         except Exception as exc:  # pragma: no cover - defensive UI guard
-            logger.exception("Failed to refresh traffic monitor")
+            logger.exception("Failed to refresh traffic diagnostics")
             self.store_error_label.setText(str(exc))
 
     def _build_overview_tab(self) -> QWidget:
         tab = QWidget()
         refresh_button = QPushButton("Refresh")
-        refresh_button.clicked.connect(self.refresh)
+        refresh_button.clicked.connect(self.refresh_overview)
         export_button = QPushButton("Export CSV")
         export_button.clicked.connect(self._on_export_clicked)
 
@@ -578,7 +654,7 @@ class TrafficMonitorWidget(QWidget):
         docs_button = QPushButton("Open documentation")
         docs_button.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(TRAFFIC_MONITOR_DOCS_URL)))
         helper_refresh_button = QPushButton("Refresh helper status")
-        helper_refresh_button.clicked.connect(self.refresh)
+        helper_refresh_button.clicked.connect(self.refresh_applications)
         copy_diag_button = QPushButton("Copy diagnostics")
         copy_diag_button.clicked.connect(self._copy_helper_diagnostics)
 
@@ -629,13 +705,15 @@ class TrafficMonitorWidget(QWidget):
         today = QDate.currentDate()
         self.history_start_date = QDateEdit(today.addDays(-6))
         self.history_start_date.setCalendarPopup(True)
+        self.history_start_date.setEnabled(False)
         self.history_start_date.dateChanged.connect(self._on_history_dates_changed)
         self.history_end_date = QDateEdit(today)
         self.history_end_date.setCalendarPopup(True)
+        self.history_end_date.setEnabled(False)
         self.history_end_date.dateChanged.connect(self._on_history_dates_changed)
 
         refresh_button = QPushButton("Refresh")
-        refresh_button.clicked.connect(self._populate_history)
+        refresh_button.clicked.connect(self.refresh_history)
         self.history_export_selector = QComboBox()
         self.history_export_selector.addItem("Daily summary CSV", "daily")
         self.history_export_selector.addItem("Session summary CSV", "sessions")
@@ -809,7 +887,6 @@ class TrafficMonitorWidget(QWidget):
         layout.addLayout(summary_grid)
         layout.addWidget(self.history_main_splitter, 1)
         tab.setLayout(layout)
-        self._on_history_range_changed()
         return _wrap_scroll_area(tab)
 
     def _build_diagnostics_tab(self) -> QWidget:
@@ -845,7 +922,7 @@ class TrafficMonitorWidget(QWidget):
         self.store_error_label = QLabel("none")
         self.store_error_label.setWordWrap(True)
         refresh_button = QPushButton("Refresh")
-        refresh_button.clicked.connect(self.refresh)
+        refresh_button.clicked.connect(self.refresh_diagnostics)
 
         grid = QGridLayout()
         grid.setSpacing(8)
