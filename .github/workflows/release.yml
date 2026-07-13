@@ -51,6 +51,15 @@ jobs:
           fi
           echo "PROJECT_VERSION=${PROJECT_VERSION}" >> "${GITHUB_ENV}"
 
+      - name: Verify matching release notes exist
+        run: |
+          RELEASE_NOTES="docs/releases/v${PROJECT_VERSION}.md"
+          if [[ ! -s "${RELEASE_NOTES}" ]]; then
+            echo "Error: matching release notes file is missing or empty: ${RELEASE_NOTES}" >&2
+            exit 1
+          fi
+          echo "RELEASE_NOTES=${RELEASE_NOTES}" >> "${GITHUB_ENV}"
+
       - name: Build release artifacts
         run: |
           VERSION="${PROJECT_VERSION}" ./scripts/build_release.sh
@@ -67,6 +76,8 @@ jobs:
       - name: Publish GitHub release assets
         uses: softprops/action-gh-release@v2
         with:
+          name: v2link-client v${{ env.PROJECT_VERSION }}
+          body_path: ${{ env.RELEASE_NOTES }}
           files: |
             dist/*.AppImage
             dist/*.deb

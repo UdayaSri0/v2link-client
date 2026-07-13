@@ -2,7 +2,7 @@
 
 Linux desktop client for V2Ray-style links, built with Python 3.11+ and PyQt6, powered by Xray-core.
 
-Current release target: **v0.2.0**
+Current release target: **v0.2.1**
 
 Project status: **beta** (stable for daily use, focused feature scope).
 
