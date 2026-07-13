@@ -42,6 +42,7 @@ class _StatsHarness:
     from v2link_client.ui.main_window import MainWindow as _MainWindow
 
     _kick_stats_poll = _MainWindow._kick_stats_poll
+    _on_stats_worker_finished = _MainWindow._on_stats_worker_finished
     _on_stats_result = _MainWindow._on_stats_result
     _on_stats_error = _MainWindow._on_stats_error
     _now_iso_seconds = _MainWindow._now_iso_seconds
@@ -71,6 +72,13 @@ class _StatsHarness:
         self._update_traffic_monitor_diagnostics = Mock()
         self.traffic_label = Mock()
         self.speed_label = Mock()
+        self.traffic_monitor_widget = SimpleNamespace(
+            update_live_metrics=Mock(),
+            refresh=Mock(),
+            refresh_history=Mock(),
+            refresh_applications=Mock(),
+            refresh_profiles=Mock(),
+        )
 
 
 def test_live_sample_does_not_trigger_complete_or_section_refreshes(tmp_path) -> None:
@@ -128,18 +136,31 @@ def test_stats_query_state_resets_after_success(monkeypatch) -> None:
     import v2link_client.ui.main_window as main_window
 
     harness = _StatsHarness()
-    monkeypatch.setattr(main_window, "get_outbound_traffic", Mock(return_value=_stats()))
+    query = Mock(return_value=_stats())
+    monkeypatch.setattr(main_window, "get_outbound_traffic", query)
     harness._kick_stats_poll()
     payload = harness._thread_pool.workers[0].fn()
 
     harness._on_stats_result(payload)
 
+    query.assert_called_once_with(
+        "/tmp/xray",
+        server="127.0.0.1:10085",
+        timeout_s=main_window.STATS_QUERY_TIMEOUT_S,
+    )
     assert harness._stats_in_flight is False
     assert harness._stats_active_token is None
     assert harness._stats_available is True
+    harness.traffic_label.setText.assert_called_once()
+    harness.traffic_monitor_widget.refresh.assert_not_called()
+    harness.traffic_monitor_widget.refresh_history.assert_not_called()
+    harness.traffic_monitor_widget.refresh_applications.assert_not_called()
+    harness.traffic_monitor_widget.refresh_profiles.assert_not_called()
 
 
 def test_stats_query_state_resets_after_failure_and_timeout() -> None:
+    from v2link_client.core.xray_api import XrayApiError
+
     harness = _StatsHarness()
     harness._stats_in_flight = True
     harness._stats_active_token = harness._stats_token
@@ -151,7 +172,8 @@ def test_stats_query_state_resets_after_failure_and_timeout() -> None:
 
     harness._stats_in_flight = True
     harness._stats_active_token = harness._stats_token
-    harness._on_stats_error(harness._stats_token, "Xray API timed out", 3000.0)
+    timeout = XrayApiError("timed out", user_message="Xray API timed out")
+    harness._on_stats_worker_finished((harness._stats_token, 1.0, 3000.0, timeout))
 
     assert harness._stats_in_flight is False
     assert harness._stats_active_token is None
