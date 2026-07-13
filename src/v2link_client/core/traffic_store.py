@@ -567,14 +567,19 @@ class TrafficStore:
             rows = conn.execute(
                 f"""
                 SELECT s.*,
-                       COUNT(ps.id) AS sample_count,
-                       MIN(ps.timestamp) AS first_sample_at,
-                       MAX(ps.timestamp) AS last_sample_at
+                       CASE WHEN EXISTS (
+                           SELECT 1 FROM proxy_samples ps
+                           WHERE ps.session_id = s.id LIMIT 1
+                       ) THEN 1 ELSE 0 END AS sample_count,
+                       NULL AS first_sample_at,
+                       (
+                           SELECT ps.timestamp FROM proxy_samples ps
+                           WHERE ps.session_id = s.id
+                           ORDER BY ps.id DESC LIMIT 1
+                       ) AS last_sample_at
                 FROM proxy_sessions s
-                LEFT JOIN proxy_samples ps ON ps.session_id = s.id
                 WHERE s.started_at >= ?
                   AND s.started_at < ?
-                GROUP BY s.id
                 ORDER BY s.started_at ASC
                 {limit_sql}
                 """,
