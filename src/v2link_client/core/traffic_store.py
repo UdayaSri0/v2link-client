@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import csv
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 import sqlite3
-from typing import Any
+import threading
+import time
+from typing import Any, Iterator
 from uuid import uuid4
 
 from v2link_client.core.storage import get_data_dir
 from v2link_client.core.xray_api import TrafficStats
 
 TRAFFIC_DB_FILENAME = "traffic.sqlite3"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+DEFAULT_SESSION_QUERY_LIMIT = 1000
 
 CONFIDENCE_LEVELS = {"exact", "high", "medium", "low", "unknown"}
 TRAFFIC_SOURCES = {"xray", "netmon-ebpf", "netmon-proc", "netmon-systemd", "mock"}
@@ -134,6 +138,15 @@ class TrafficHistoryDiagnostics:
 
 
 @dataclass(frozen=True, slots=True)
+class RetentionCleanupResult:
+    ran: bool
+    rows_removed: int
+    duration_ms: float
+    completed_at: str | None
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class AppIdentity:
     id: str
     name: str
@@ -204,6 +217,14 @@ def _next_month_start(month_prefix: str) -> str:
     return f"{year:04d}-{month + 1:02d}-01"
 
 
+def _timestamp_range(start_date: str, end_date: str) -> tuple[str, str]:
+    start = datetime.fromisoformat(str(start_date)[:10]).date()
+    end = datetime.fromisoformat(str(end_date)[:10]).date()
+    if end < start:
+        start, end = end, start
+    return f"{start.isoformat()}T00:00:00", f"{(end + timedelta(days=1)).isoformat()}T00:00:00"
+
+
 def _stats_pair(stats: TrafficStats | dict[str, Any] | None) -> tuple[int, int]:
     if stats is None:
         return 0, 0
@@ -232,6 +253,7 @@ class TrafficStore:
         self.db_path = db_path or get_traffic_db_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._active_proxy_session_id: str | None = None
+        self._thread_state = threading.local()
         self._migrate()
 
     def start_proxy_session(
@@ -528,28 +550,60 @@ class TrafficStore:
     def get_sessions_for_date(self, date: str) -> list[ProxySessionSummary]:
         return self.get_sessions_for_range(date, date)
 
-    def get_sessions_for_range(self, start_date: str, end_date: str) -> list[ProxySessionSummary]:
-        start = str(start_date)[:10]
-        end = str(end_date)[:10]
-        if end < start:
-            start, end = end, start
+    def get_sessions_for_range(
+        self,
+        start_date: str,
+        end_date: str,
+        *,
+        limit: int | None = DEFAULT_SESSION_QUERY_LIMIT,
+    ) -> list[ProxySessionSummary]:
+        start, end_exclusive = _timestamp_range(start_date, end_date)
+        limit_sql = ""
+        params: list[Any] = [start, end_exclusive]
+        if limit is not None:
+            limit_sql = "LIMIT ?"
+            params.append(max(1, int(limit)))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT s.*,
+                       CASE WHEN EXISTS (
+                           SELECT 1 FROM proxy_samples ps
+                           WHERE ps.session_id = s.id LIMIT 1
+                       ) THEN 1 ELSE 0 END AS sample_count,
+                       NULL AS first_sample_at,
+                       (
+                           SELECT ps.timestamp FROM proxy_samples ps
+                           WHERE ps.session_id = s.id
+                           ORDER BY ps.id DESC LIMIT 1
+                       ) AS last_sample_at
+                FROM proxy_sessions s
+                WHERE s.started_at >= ?
+                  AND s.started_at < ?
+                ORDER BY s.started_at ASC
+                {limit_sql}
+                """,
+                tuple(params),
+            ).fetchall()
+        return [self._session_summary_from_row(row) for row in rows]
+
+    def get_recent_sessions(self, *, days: int = 30, limit: int = 5) -> list[ProxySessionSummary]:
+        start = (_now().date() - timedelta(days=max(1, int(days)) - 1)).isoformat()
+        start_timestamp, _end = _timestamp_range(start, _now().date().isoformat())
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT s.*,
-                       COUNT(ps.id) AS sample_count,
-                       MIN(ps.timestamp) AS first_sample_at,
-                       MAX(ps.timestamp) AS last_sample_at
+                SELECT s.*, 0 AS sample_count, NULL AS first_sample_at, NULL AS last_sample_at
                 FROM proxy_sessions s
-                LEFT JOIN proxy_samples ps ON ps.session_id = s.id
-                WHERE substr(s.started_at, 1, 10) >= ?
-                  AND substr(s.started_at, 1, 10) <= ?
-                GROUP BY s.id
-                ORDER BY s.started_at ASC
+                WHERE s.started_at >= ?
+                ORDER BY s.started_at DESC
+                LIMIT ?
                 """,
-                (start, end),
+                (start_timestamp, max(1, int(limit))),
             ).fetchall()
-        return [self._session_summary_from_row(row) for row in rows]
+        summaries = [self._session_summary_from_row(row) for row in rows]
+        summaries.reverse()
+        return summaries
 
     def get_session_detail(self, session_id: str) -> ProxySessionDetail:
         with self._connect() as conn:
@@ -620,6 +674,88 @@ class TrafficStore:
             ).fetchall()
         return [self._proxy_sample_from_row(row) for row in rows]
 
+    def get_session_sample_count(self, session_id: str) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS sample_count FROM proxy_samples WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        return int(row["sample_count"] or 0) if row else 0
+
+    def get_recent_session_samples(
+        self,
+        session_id: str,
+        *,
+        limit: int,
+    ) -> list[ProxyTrafficSample]:
+        return self.get_recent_samples(session_id=session_id, limit=limit)
+
+    def get_session_chart_samples(
+        self,
+        session_id: str,
+        *,
+        maximum_points: int,
+    ) -> list[ProxyTrafficSample]:
+        """Return peak-preserving time buckets without returning an unbounded row set."""
+        limit = max(2, int(maximum_points))
+        with self._connect() as conn:
+            count_row = conn.execute(
+                "SELECT COUNT(*) AS sample_count FROM proxy_samples WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            sample_count = int(count_row["sample_count"] or 0) if count_row else 0
+            if sample_count <= limit:
+                rows = conn.execute(
+                    """
+                    SELECT session_id, timestamp, uplink_bytes, downlink_bytes,
+                           uplink_delta_bytes, downlink_delta_bytes, upload_bps, download_bps,
+                           SUM(uplink_delta_bytes) OVER (ORDER BY id) AS session_uplink_bytes,
+                           SUM(downlink_delta_bytes) OVER (ORDER BY id) AS session_downlink_bytes
+                    FROM proxy_samples
+                    WHERE session_id = ?
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (session_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    WITH numbered AS (
+                        SELECT id, session_id, timestamp, uplink_bytes, downlink_bytes,
+                               uplink_delta_bytes, downlink_delta_bytes, upload_bps, download_bps,
+                               ROW_NUMBER() OVER (ORDER BY id) AS row_number,
+                               COUNT(*) OVER () AS total_rows,
+                               SUM(uplink_delta_bytes) OVER (ORDER BY id) AS session_uplink_bytes,
+                               SUM(downlink_delta_bytes) OVER (ORDER BY id) AS session_downlink_bytes
+                        FROM proxy_samples
+                        WHERE session_id = ?
+                    ), bucketed AS (
+                        SELECT *,
+                               CAST(((row_number - 1) * (? - 1)) / MAX(1, total_rows - 1) AS INTEGER) AS bucket
+                        FROM numbered
+                    ), ranked AS (
+                        SELECT *,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY bucket
+                                   ORDER BY MAX(download_bps, upload_bps) DESC, row_number ASC
+                               ) AS bucket_rank
+                        FROM bucketed
+                    )
+                    SELECT session_id, timestamp, uplink_bytes, downlink_bytes,
+                           uplink_delta_bytes, downlink_delta_bytes, upload_bps, download_bps,
+                           session_uplink_bytes, session_downlink_bytes
+                    FROM ranked
+                    WHERE row_number = 1
+                       OR row_number = total_rows
+                       OR (bucket > 0 AND bucket < ? - 1 AND bucket_rank = 1)
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (session_id, limit, limit, limit),
+                ).fetchall()
+        return [self._proxy_sample_from_row(row) for row in rows]
+
     def get_hourly_usage_for_date(self, date: str) -> list[HourlyUsage]:
         usage = {hour: [0, 0] for hour in range(24)}
         with self._connect() as conn:
@@ -666,6 +802,7 @@ class TrafficStore:
         end = str(end_date)[:10]
         if end < start:
             start, end = end, start
+        start_timestamp, end_exclusive = _timestamp_range(start, end)
         daily: dict[str, dict[str, Any]] = {}
         with self._connect() as conn:
             usage_rows = conn.execute(
@@ -686,11 +823,11 @@ class TrafficStore:
                        MIN(started_at) AS first_session_at,
                        MAX(COALESCE(ended_at, started_at)) AS last_session_at
                 FROM proxy_sessions
-                WHERE substr(started_at, 1, 10) >= ?
-                  AND substr(started_at, 1, 10) <= ?
+                WHERE started_at >= ?
+                  AND started_at < ?
                 GROUP BY date
                 """,
-                (start, end),
+                (start_timestamp, end_exclusive),
             ).fetchall()
         for row in usage_rows:
             date = str(row["date"])
@@ -828,7 +965,7 @@ class TrafficStore:
     ) -> None:
         destination = Path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        rows = self.get_sessions_for_range(start_date, end_date)
+        rows = self.get_sessions_for_range(start_date, end_date, limit=None)
         with destination.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             writer.writerow(
@@ -870,8 +1007,7 @@ class TrafficStore:
     def export_session_samples_csv(self, path: str | Path, *, session_id: str) -> None:
         destination = Path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        rows = self.get_session_samples(session_id)
-        with destination.open("w", newline="", encoding="utf-8") as handle:
+        with self._connect() as conn, destination.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             writer.writerow(
                 [
@@ -884,7 +1020,18 @@ class TrafficStore:
                     "download_bps",
                 ]
             )
-            for row in rows:
+            rows = conn.execute(
+                """
+                SELECT session_id, timestamp, uplink_bytes, downlink_bytes,
+                       uplink_delta_bytes, downlink_delta_bytes, upload_bps, download_bps
+                FROM proxy_samples
+                WHERE session_id = ?
+                ORDER BY id ASC
+                """,
+                (session_id,),
+            )
+            for raw_row in rows:
+                row = self._proxy_sample_from_row(raw_row)
                 writer.writerow(
                     [
                         row.timestamp,
@@ -935,6 +1082,57 @@ class TrafficStore:
         with self._connect() as conn:
             result = conn.execute("DELETE FROM proxy_samples WHERE timestamp < ?", (cutoff,))
             return int(result.rowcount or 0)
+
+    def run_retention_cleanup_if_due(
+        self,
+        retention_days: int,
+        *,
+        minimum_interval: timedelta = timedelta(days=1),
+        force: bool = False,
+    ) -> RetentionCleanupResult:
+        started = time.monotonic()
+        now = _now()
+        with self._connect() as conn:
+            previous = conn.execute(
+                "SELECT last_run_at FROM traffic_maintenance WHERE name = 'sample_retention'"
+            ).fetchone()
+            previous_at = None
+            if previous and previous["last_run_at"]:
+                try:
+                    previous_at = _parse_iso(str(previous["last_run_at"]))
+                except ValueError:
+                    previous_at = None
+            if not force and previous_at is not None and now - previous_at < minimum_interval:
+                return RetentionCleanupResult(False, 0, 0.0, _to_iso(previous_at), None)
+
+            rows_removed = 0
+            error: str | None = None
+            try:
+                days = int(retention_days)
+                if days > 0:
+                    cutoff = _to_iso(now - timedelta(days=days))
+                    result = conn.execute(
+                        "DELETE FROM proxy_samples WHERE timestamp < ?",
+                        (cutoff,),
+                    )
+                    rows_removed = int(result.rowcount or 0)
+            except Exception as exc:
+                error = str(exc)
+            duration_ms = (time.monotonic() - started) * 1000.0
+            completed_at = _to_iso(now)
+            conn.execute(
+                """
+                INSERT INTO traffic_maintenance(name, last_run_at, duration_ms, rows_removed, last_error)
+                VALUES ('sample_retention', ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    last_run_at = excluded.last_run_at,
+                    duration_ms = excluded.duration_ms,
+                    rows_removed = excluded.rows_removed,
+                    last_error = excluded.last_error
+                """,
+                (completed_at, duration_ms, rows_removed, error),
+            )
+        return RetentionCleanupResult(True, rows_removed, duration_ms, completed_at, error)
 
     def get_history_diagnostics(self) -> TrafficHistoryDiagnostics:
         with self._connect() as conn:
@@ -1183,13 +1381,42 @@ class TrafficStore:
                 conn.execute("DELETE FROM app_tracking_events")
                 conn.execute("DELETE FROM apps")
 
-    def _connect(self) -> sqlite3.Connection:
+    def _open_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA busy_timeout = 3000")
+        conn.execute("PRAGMA wal_autocheckpoint = 1000")
         return conn
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        persistent = getattr(self._thread_state, "connection", None)
+        if isinstance(persistent, sqlite3.Connection):
+            with persistent:
+                yield persistent
+            return
+        conn = self._open_connection()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
+    @contextmanager
+    def persistent_thread_connection(self) -> Iterator[None]:
+        """Reuse one SQLite connection only within the calling worker thread."""
+        if getattr(self._thread_state, "connection", None) is not None:
+            yield
+            return
+        conn = self._open_connection()
+        self._thread_state.connection = conn
+        try:
+            yield
+        finally:
+            del self._thread_state.connection
+            conn.close()
 
     def _migrate(self) -> None:
         with self._connect() as conn:
@@ -1217,6 +1444,13 @@ class TrafficStore:
                 conn.execute(
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (2, _to_iso()),
+                )
+                version = 2
+            if version < 3:
+                self._apply_schema_v3(conn)
+                conn.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (3, _to_iso()),
                 )
 
     def _apply_schema_v1(self, conn: sqlite3.Connection) -> None:
@@ -1354,6 +1588,19 @@ class TrafficStore:
             """
         )
 
+    def _apply_schema_v3(self, conn: sqlite3.Connection) -> None:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS traffic_maintenance (
+                name TEXT PRIMARY KEY,
+                last_run_at TEXT NULL,
+                duration_ms REAL NOT NULL DEFAULT 0,
+                rows_removed INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NULL
+            );
+            """
+        )
+
     def _add_daily_usage(
         self,
         conn: sqlite3.Connection,
@@ -1455,6 +1702,7 @@ class TrafficStore:
         )
 
     def _proxy_sample_from_row(self, row: sqlite3.Row) -> ProxyTrafficSample:
+        keys = row.keys()
         return ProxyTrafficSample(
             session_id=str(row["session_id"]),
             timestamp=str(row["timestamp"]),
@@ -1464,6 +1712,16 @@ class TrafficStore:
             downlink_delta_bytes=max(0, int(row["downlink_delta_bytes"] or 0)),
             upload_bps=max(0.0, float(row["upload_bps"] or 0.0)),
             download_bps=max(0.0, float(row["download_bps"] or 0.0)),
+            session_uplink_bytes=(
+                max(0, int(row["session_uplink_bytes"] or 0))
+                if "session_uplink_bytes" in keys
+                else 0
+            ),
+            session_downlink_bytes=(
+                max(0, int(row["session_downlink_bytes"] or 0))
+                if "session_downlink_bytes" in keys
+                else 0
+            ),
         )
 
     def _session_summary_from_row(self, row: sqlite3.Row) -> ProxySessionSummary:

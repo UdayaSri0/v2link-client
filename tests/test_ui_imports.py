@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -61,6 +62,10 @@ def test_history_tab_selecting_date_and_session_updates_details(tmp_path, monkey
     widget.history_table.selectRow(0)
     assert widget.sessions_table.rowCount() == 1
     widget.sessions_table.selectRow(0)
+    deadline = time.monotonic() + 3.0
+    while widget.session_detail_labels["profile"].text() == "none" and time.monotonic() < deadline:
+        _app().processEvents()
+        time.sleep(0.005)
     assert widget.session_detail_labels["profile"].text() == "Home"
     assert widget.session_detail_labels["download"].text() == "200 B"
     widget.close()

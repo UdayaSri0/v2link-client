@@ -66,6 +66,7 @@ from v2link_client.core.storage import get_config_dir, get_state_dir, load_json,
 from v2link_client.core.system_subprocess import detect_runtime_kind
 from v2link_client.core.traffic_settings import TrafficSettings, load_traffic_settings
 from v2link_client.core.traffic_store import ProxyTrafficSample, TrafficStore
+from v2link_client.core.traffic_storage_worker import TrafficStorageWorker
 from v2link_client.core.update_check import UpdateCheckResult, check_for_updates
 from v2link_client.core.xray_api import TrafficStats, get_outbound_traffic
 from v2link_client.core.xray_locator import (
@@ -94,6 +95,8 @@ PROXY_AUDIT_INTERVAL_MS = 4000
 PROXY_AUDIT_MAX_BACKOFF_S = 30.0
 STATUS_INTERVAL_MS = 1000
 STATS_INTERVAL_MS = 2000
+TRAFFIC_PERSISTENCE_INTERVAL_MS = 5000
+TRAFFIC_FINAL_FLUSH_TIMEOUT_S = 5.0
 OVERVIEW_INTERVAL_MS = 10_000
 DIAGNOSTICS_INTERVAL_MS = 30_000
 STATS_QUERY_TIMEOUT_S = 3.0
@@ -277,6 +280,11 @@ class MainWindow(QMainWindow):
             logger.exception("Failed to initialize traffic store")
             self._traffic_store = None
             self._last_traffic_store_error = str(exc)
+        self._traffic_storage_worker = (
+            TrafficStorageWorker(self._traffic_store)
+            if self._traffic_store is not None
+            else None
+        )
         self.traffic_monitor_widget = TrafficMonitorWidget(
             self._traffic_store,
             settings=self._traffic_settings,
@@ -372,6 +380,10 @@ class MainWindow(QMainWindow):
         self._stats_timer.setInterval(STATS_INTERVAL_MS)
         self._stats_timer.timeout.connect(self._kick_stats_poll)
 
+        self._traffic_persistence_timer = QTimer(self)
+        self._traffic_persistence_timer.setInterval(TRAFFIC_PERSISTENCE_INTERVAL_MS)
+        self._traffic_persistence_timer.timeout.connect(self._persist_latest_traffic_sample)
+
         self._overview_timer = QTimer(self)
         self._overview_timer.setInterval(OVERVIEW_INTERVAL_MS)
         self._overview_timer.timeout.connect(self._refresh_scheduled_overview)
@@ -398,6 +410,9 @@ class MainWindow(QMainWindow):
         self._stats_available = False
         self._traffic_session_id: str | None = None
         self._last_traffic_sample: ProxyTrafficSample | None = None
+        self._pending_traffic_stats: TrafficStats | None = None
+        self._traffic_session_uplink_bytes = 0
+        self._traffic_session_downlink_bytes = 0
         self._last_traffic_activity_at: float | None = None
         self._ping_in_flight = False
         self._speed_test_in_flight = False
@@ -428,6 +443,10 @@ class MainWindow(QMainWindow):
         except Exception:
             logger.exception("Failed to auto-repair stale loopback proxy settings")
         self._update_diagnostics_runtime_state()
+        if self._traffic_storage_worker is not None:
+            self._traffic_storage_worker.submit_cleanup(
+                self._traffic_settings.detailed_retention_days
+            )
         self._overview_timer.start()
         self._diagnostics_timer.start()
 
@@ -1104,6 +1123,7 @@ class MainWindow(QMainWindow):
         self._update_diagnostics_runtime_state()
         self._status_timer.start()
         self._stats_timer.start()
+        self._traffic_persistence_timer.start()
         self._kick_stats_poll()
 
     def _poll_core_status(self) -> None:
@@ -1114,6 +1134,7 @@ class MainWindow(QMainWindow):
         code = self._process.returncode()
         self._status_timer.stop()
         self._stats_timer.stop()
+        self._traffic_persistence_timer.stop()
         self.status_label.setText("STOPPED")
         self.start_stop_button.setText("Start")
         self.start_stop_button.setProperty("variant", "primary")
@@ -1148,6 +1169,7 @@ class MainWindow(QMainWindow):
     def _stop_core(self, *, user_message: str) -> None:
         self._status_timer.stop()
         self._stats_timer.stop()
+        self._traffic_persistence_timer.stop()
         self._health_timer.stop()
         self._proxy_audit_timer.stop()
         self._health_token += 1
@@ -1562,6 +1584,9 @@ class MainWindow(QMainWindow):
     def _start_traffic_session(self) -> None:
         self._traffic_session_id = None
         self._last_traffic_sample = None
+        self._pending_traffic_stats = None
+        self._traffic_session_uplink_bytes = 0
+        self._traffic_session_downlink_bytes = 0
         self.traffic_monitor_widget.set_current_session(None)
         if not self._traffic_settings.proxy_history_enabled:
             self._refresh_traffic_monitor()
@@ -1590,34 +1615,76 @@ class MainWindow(QMainWindow):
         self._refresh_traffic_monitor()
 
     def _record_traffic_sample(self, stats: TrafficStats) -> ProxyTrafficSample | None:
-        # Hot path: stats timer -> worker -> _on_stats_result -> this bounded write -> live labels.
-        # Overview/history/app/profile/diagnostic reads are deliberately scheduled elsewhere.
+        # Hot path is memory-only. The five-second persistence timer queues cumulative
+        # counters to the bounded storage worker, so work does not grow with DB size.
         if not self._traffic_settings.proxy_history_enabled:
             return None
-        if self._traffic_store is None or self._traffic_session_id is None:
+        if self._traffic_session_id is None:
             return None
-        try:
-            sample = self._traffic_store.record_proxy_sample(self._traffic_session_id, stats)
-        except Exception as exc:  # pragma: no cover - defensive persistence guard
-            logger.exception("Failed to record traffic sample")
-            self._last_traffic_store_error = str(exc)
-            return None
-
-        self._last_traffic_store_error = None
+        previous_up = self._last_uplink if self._last_uplink is not None else 0
+        previous_down = self._last_downlink if self._last_downlink is not None else 0
+        raw_up_delta = int(stats.uplink_bytes) - int(previous_up)
+        raw_down_delta = int(stats.downlink_bytes) - int(previous_down)
+        warnings: list[str] = []
+        up_delta = max(0, raw_up_delta)
+        down_delta = max(0, raw_down_delta)
+        if raw_up_delta < 0:
+            warnings.append(f"uplink counter reset/decreased ({previous_up} -> {stats.uplink_bytes})")
+        if raw_down_delta < 0:
+            warnings.append(f"downlink counter reset/decreased ({previous_down} -> {stats.downlink_bytes})")
+        now = time.monotonic()
+        elapsed = max(0.001, now - self._last_stats_at) if self._last_stats_at is not None else 1.0
+        self._traffic_session_uplink_bytes += up_delta
+        self._traffic_session_downlink_bytes += down_delta
+        sample = ProxyTrafficSample(
+            session_id=self._traffic_session_id,
+            timestamp=self._now_iso_seconds(),
+            uplink_bytes=int(stats.uplink_bytes),
+            downlink_bytes=int(stats.downlink_bytes),
+            uplink_delta_bytes=up_delta,
+            downlink_delta_bytes=down_delta,
+            upload_bps=float(up_delta) / elapsed,
+            download_bps=float(down_delta) / elapsed,
+            session_uplink_bytes=self._traffic_session_uplink_bytes,
+            session_downlink_bytes=self._traffic_session_downlink_bytes,
+            warning="; ".join(warnings) if warnings else None,
+        )
         self._last_traffic_sample = sample
+        self._pending_traffic_stats = stats
         self.traffic_monitor_widget.update_live_sample(sample)
         return sample
 
+    def _persist_latest_traffic_sample(self) -> None:
+        worker = self._traffic_storage_worker
+        session_id = self._traffic_session_id
+        stats = self._pending_traffic_stats
+        if self._closing or worker is None or session_id is None or stats is None:
+            return
+        if not worker.submit_sample(session_id, stats):
+            self._last_traffic_store_error = "Traffic persistence queue is full; latest counters will be retried."
+            return
+        self._last_traffic_store_error = worker.last_error
+
     def _end_traffic_session(self, *, final_stats: TrafficStats | None = None) -> None:
-        if self._traffic_store is not None and self._traffic_session_id is not None:
+        session_id = self._traffic_session_id
+        if self._traffic_store is not None and session_id is not None:
             try:
-                self._traffic_store.end_proxy_session(self._traffic_session_id, final_stats=final_stats)
+                persisted = False
+                if self._traffic_storage_worker is not None:
+                    persisted = self._traffic_storage_worker.end_session(
+                        session_id,
+                        final_stats,
+                        timeout_s=TRAFFIC_FINAL_FLUSH_TIMEOUT_S,
+                    )
+                if not persisted:
+                    self._traffic_store.end_proxy_session(session_id, final_stats=final_stats)
                 self._last_traffic_store_error = None
             except Exception as exc:  # pragma: no cover - defensive persistence guard
                 logger.exception("Failed to end traffic session")
                 self._last_traffic_store_error = str(exc)
         self._traffic_session_id = None
         self._last_traffic_sample = None
+        self._pending_traffic_stats = None
         self.traffic_monitor_widget.set_current_session(None)
         self._refresh_traffic_monitor()
 
@@ -1636,6 +1703,11 @@ class MainWindow(QMainWindow):
             warning = self._last_traffic_sample.warning
         elif not self._stats_available:
             warning = self._last_stats_query_result
+        worker_error = (
+            self._traffic_storage_worker.last_error
+            if self._traffic_storage_worker is not None
+            else None
+        )
         self.traffic_monitor_widget.set_diagnostics(
             api_server=self._traffic_api_server(),
             stats_available=self._stats_available,
@@ -1644,7 +1716,7 @@ class MainWindow(QMainWindow):
                 self._last_traffic_sample.timestamp if self._last_traffic_sample is not None else None
             ),
             warning=warning,
-            store_error=self._last_traffic_store_error,
+            store_error=self._last_traffic_store_error or worker_error,
         )
 
     def _traffic_monitor_is_visible(self) -> bool:
@@ -1696,6 +1768,11 @@ class MainWindow(QMainWindow):
         else:
             self._netmon_client.stop_tracking()
         self.traffic_monitor_widget.set_netmon_client(self._netmon_client)
+        if self._traffic_storage_worker is not None:
+            self._traffic_storage_worker.submit_cleanup(
+                settings.detailed_retention_days,
+                force=True,
+            )
         self._update_diagnostics_runtime_state()
 
     def _tcp_reachable(self, host: str, port: int, *, timeout_s: float = 0.25) -> bool:
@@ -1737,6 +1814,11 @@ class MainWindow(QMainWindow):
         now = time.monotonic()
         xray_resolution = self._current_xray_resolution(refresh=False)
         xray_assets = xray_asset_status(xray_resolution)
+        cleanup = (
+            self._traffic_storage_worker.last_cleanup
+            if self._traffic_storage_worker is not None
+            else None
+        )
 
         desired = self._proxy_status_to_dict(audit.desired if audit is not None else None)
         actual = self._proxy_status_to_dict(audit.actual if audit is not None else None)
@@ -1816,6 +1898,25 @@ class MainWindow(QMainWindow):
                     else None
                 ),
                 "last_store_error": self._last_traffic_store_error,
+                "persistence_queue_size": (
+                    self._traffic_storage_worker.queue_size
+                    if self._traffic_storage_worker is not None
+                    else 0
+                ),
+                "persistence_queue_dropped": (
+                    self._traffic_storage_worker.dropped_requests
+                    if self._traffic_storage_worker is not None
+                    else 0
+                ),
+                "persistence_worker_error": (
+                    self._traffic_storage_worker.last_error
+                    if self._traffic_storage_worker is not None
+                    else None
+                ),
+                "last_retention_cleanup_at": cleanup.completed_at if cleanup is not None else None,
+                "last_retention_cleanup_duration_ms": cleanup.duration_ms if cleanup is not None else None,
+                "last_retention_cleanup_rows_removed": cleanup.rows_removed if cleanup is not None else None,
+                "last_retention_cleanup_error": cleanup.error if cleanup is not None else None,
                 "proxy_history_enabled": bool(self._traffic_settings.proxy_history_enabled),
                 "app_tracking_enabled": bool(self._traffic_settings.app_tracking_enabled),
                 "detailed_retention_days": int(self._traffic_settings.detailed_retention_days),
@@ -2280,6 +2381,7 @@ class MainWindow(QMainWindow):
         self._closing = True
         self._status_timer.stop()
         self._stats_timer.stop()
+        self._traffic_persistence_timer.stop()
         self._overview_timer.stop()
         self._diagnostics_timer.stop()
         self._health_timer.stop()
@@ -2288,6 +2390,12 @@ class MainWindow(QMainWindow):
         self._save_profile_preferences()
         if self._process.is_running():
             self._stop_core(user_message="Stopped (app closed).")
+        if self._traffic_storage_worker is not None:
+            if not self._traffic_storage_worker.shutdown(
+                drain=True,
+                timeout_s=TRAFFIC_FINAL_FLUSH_TIMEOUT_S,
+            ):
+                logger.warning("Traffic storage worker did not stop before shutdown timeout")
         super().closeEvent(event)
 
     def _apply_system_proxy(self) -> None:

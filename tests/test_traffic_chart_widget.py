@@ -1,11 +1,30 @@
 from __future__ import annotations
 
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 from v2link_client.core.traffic_store import DailyUsageBreakdown, ProxyTrafficSample
 from v2link_client.ui.traffic_chart_widget import (
+    MAX_SESSION_CHART_POINTS,
+    SESSION_CHART_MARKER_LIMIT,
+    TrafficLineChartWidget,
+    downsample_session_chart_points,
     prepare_daily_chart_data,
     prepare_session_cumulative_chart_data,
     prepare_session_speed_chart_data,
 )
+import pytest
+
+_QT_APP = None
+
+
+def _app():
+    global _QT_APP
+    from PyQt6.QtWidgets import QApplication
+
+    _QT_APP = QApplication.instance() or _QT_APP or QApplication([])
+    return _QT_APP
 
 
 def _sample(timestamp: str, up_delta: int, down_delta: int) -> ProxyTrafficSample:
@@ -77,3 +96,56 @@ def test_session_chart_speed_and_cumulative_data() -> None:
     assert cumulative[0].download_value == 200
     assert cumulative[1].download_value == 275
     assert cumulative[1].upload_value == 150
+
+
+@pytest.mark.parametrize("count", [0, 1, 100, MAX_SESSION_CHART_POINTS])
+def test_downsampling_keeps_data_at_or_below_limit(count: int) -> None:
+    points = prepare_session_speed_chart_data(
+        _sample(f"2026-05-01T20:{idx // 60:02d}:{idx % 60:02d}+00:00", idx, idx * 2)
+        for idx in range(count)
+    )
+
+    assert len(points) == count
+
+
+@pytest.mark.parametrize("count", [MAX_SESSION_CHART_POINTS + 1, 10_000, 100_000])
+def test_downsampling_bounds_large_series_and_preserves_endpoints(count: int) -> None:
+    source = [
+        _sample(f"2026-05-{1 + idx // 86400:02d}T{(idx // 3600) % 24:02d}:{(idx // 60) % 60:02d}:{idx % 60:02d}+00:00", idx, idx * 2)
+        for idx in range(count)
+    ]
+
+    points = prepare_session_speed_chart_data(source)
+
+    assert len(points) <= MAX_SESSION_CHART_POINTS
+    assert points[0].label == prepare_session_speed_chart_data(source[:1])[0].label
+    assert points[-1].label == prepare_session_speed_chart_data(source[-1:])[0].label
+    values = [point.upload_value for point in points]
+    assert values == sorted(values)
+
+
+def test_downsampling_preserves_upload_and_download_peaks_in_order() -> None:
+    from v2link_client.ui.traffic_chart_widget import SessionChartPoint
+
+    points = [SessionChartPoint(str(idx).zfill(5), float(idx), float(idx)) for idx in range(10_000)]
+    points[2_500] = SessionChartPoint("02500", 1_000_000.0, 1.0)
+    points[7_500] = SessionChartPoint("07500", 1.0, 2_000_000.0)
+
+    sampled = downsample_session_chart_points(points, maximum_points=600)
+
+    assert len(sampled) <= 600
+    assert max(point.download_value for point in sampled) == 1_000_000.0
+    assert max(point.upload_value for point in sampled) == 2_000_000.0
+    assert [point.label for point in sampled] == sorted(point.label for point in sampled)
+
+
+def test_line_chart_suppresses_markers_for_large_series() -> None:
+    from v2link_client.ui.traffic_chart_widget import SessionChartPoint
+
+    _app()
+    widget = TrafficLineChartWidget()
+    widget.set_data(SessionChartPoint(str(idx), float(idx), float(idx)) for idx in range(SESSION_CHART_MARKER_LIMIT + 1))
+
+    assert widget.markers_enabled is False
+    assert len(widget.points) <= MAX_SESSION_CHART_POINTS
+    widget.close()

@@ -5,8 +5,9 @@ from __future__ import annotations
 import logging
 import os
 from datetime import date, datetime, timedelta
+from typing import Callable
 
-from PyQt6.QtCore import QDate, Qt, QUrl, pyqtSignal
+from PyQt6.QtCore import QObject, QRunnable, QDate, QThreadPool, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -56,6 +57,7 @@ from v2link_client.core.traffic_store import (
     TrafficUsageSummary,
 )
 from v2link_client.ui.traffic_chart_widget import (
+    MAX_SESSION_CHART_POINTS,
     TrafficBarChartWidget,
     TrafficLineChartWidget,
     prepare_session_cumulative_chart_data,
@@ -88,6 +90,26 @@ NOTICE_DETAILS_TEXT = (
     "locally on this device."
 )
 TRAFFIC_MONITOR_DOCS_URL = "https://github.com/UdayaSri0/v2link-client/blob/beta/docs/traffic-monitor.md"
+
+
+class TrafficTaskSignals(QObject):
+    result = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+
+class TrafficTaskWorker(QRunnable):
+    def __init__(self, fn: Callable[[], object]) -> None:
+        super().__init__()
+        self.fn = fn
+        self.signals = TrafficTaskSignals()
+
+    def run(self) -> None:
+        try:
+            result = self.fn()
+        except Exception as exc:  # pragma: no cover - defensive worker boundary
+            self.signals.error.emit(str(exc))
+            return
+        self.signals.result.emit(result)
 
 
 def _wrap_scroll_area(widget: QWidget) -> QScrollArea:
@@ -135,12 +157,18 @@ class TrafficMonitorWidget(QWidget):
         self._selected_history_session_id: str | None = None
         self._history_daily_rows: list[DailyUsageBreakdown] = []
         self._history_session_rows: list[ProxySessionSummary] = []
+        self._history_table_signature: object | None = None
+        self._sessions_table_signature: object | None = None
         self._last_live_sample: ProxyTrafficSample | None = None
         self._last_warning: str | None = None
         self._layout_mode = "normal"
         self._focus_mode = False
         self._notice_expanded = False
         self._restoring_layout = False
+        self._thread_pool = QThreadPool.globalInstance()
+        self._history_query_generation = 0
+        self._session_detail_cache: dict[str, tuple[ProxySessionDetail, list[ProxyTrafficSample]]] = {}
+        self._export_in_flight = False
 
         self.notice_label = QLabel(NOTICE_COMPACT_TEXT)
         self.notice_label.setWordWrap(True)
@@ -782,7 +810,7 @@ class TrafficMonitorWidget(QWidget):
         self.session_chart_mode = QComboBox()
         self.session_chart_mode.addItem("Speed view", "speed")
         self.session_chart_mode.addItem("Cumulative usage view", "bytes")
-        self.session_chart_mode.currentIndexChanged.connect(self._refresh_selected_session_detail)
+        self.session_chart_mode.currentIndexChanged.connect(self._on_session_chart_mode_changed)
         self.session_chart = TrafficLineChartWidget()
 
         self.session_detail_labels: dict[str, QLabel] = {}
@@ -1200,6 +1228,10 @@ class TrafficMonitorWidget(QWidget):
 
         rows = self._history_daily_rows
         self._update_history_summary(rows, self._history_session_rows)
+        signature = (start_date, end_date, tuple(rows), tuple(self._history_session_rows))
+        if signature == self._history_table_signature:
+            return
+        self._history_table_signature = signature
         self.history_empty_label.setVisible(not rows)
         self.history_table.setVisible(bool(rows))
         self.daily_chart.set_data(rows)
@@ -1312,6 +1344,10 @@ class TrafficMonitorWidget(QWidget):
             return
         rows = self._store.get_sessions_for_date(self._selected_history_date)
         self._history_session_rows = rows
+        signature = (self._selected_history_date, tuple(rows))
+        if signature == self._sessions_table_signature:
+            return
+        self._sessions_table_signature = signature
         self.sessions_table.blockSignals(True)
         self.sessions_table.setSortingEnabled(False)
         self.sessions_table.setRowCount(len(rows))
@@ -1380,15 +1416,56 @@ class TrafficMonitorWidget(QWidget):
         if self._store is None or not self._selected_history_session_id:
             self._clear_session_detail()
             return
-        try:
-            detail = self._store.get_session_detail(self._selected_history_session_id)
-            samples = self._store.get_session_samples(self._selected_history_session_id)
-        except KeyError:
-            self._clear_session_detail()
+        session_id = self._selected_history_session_id
+        cached = self._session_detail_cache.get(session_id)
+        if cached is not None and cached[0].status != "active":
+            self._set_session_detail(*cached)
             return
+
+        self._history_query_generation += 1
+        generation = self._history_query_generation
+        store = self._store
+
+        def _load():
+            detail = store.get_session_detail(session_id)
+            samples = store.get_session_chart_samples(
+                session_id,
+                maximum_points=MAX_SESSION_CHART_POINTS,
+            )
+            return generation, session_id, detail, samples
+
+        worker = TrafficTaskWorker(_load)
+        worker.signals.result.connect(self._on_session_detail_loaded)
+        worker.signals.error.connect(
+            lambda message: self._on_session_detail_error(generation, session_id, message)
+        )
+        self._thread_pool.start(worker)
+
+    def _on_session_detail_loaded(self, payload: object) -> None:
+        generation, session_id, detail, samples = payload  # type: ignore[misc]
+        if generation != self._history_query_generation:
+            return
+        if session_id != self._selected_history_session_id:
+            return
+        self._session_detail_cache[str(session_id)] = (detail, samples)
         self._set_session_detail(detail, samples)
 
+    def _on_session_detail_error(self, generation: int, session_id: str, message: str) -> None:
+        if generation != self._history_query_generation or session_id != self._selected_history_session_id:
+            return
+        if "not found" in message.lower():
+            self._clear_session_detail()
+            return
+        self.store_error_label.setText(message)
+
+    def _on_session_chart_mode_changed(self) -> None:
+        session_id = self._selected_history_session_id
+        cached = self._session_detail_cache.get(session_id or "")
+        if cached is not None:
+            self._set_session_detail(*cached)
+
     def _clear_session_detail(self) -> None:
+        self._history_query_generation += 1
         for label in getattr(self, "session_detail_labels", {}).values():
             label.setText("none")
         if hasattr(self, "session_chart"):
@@ -1469,9 +1546,7 @@ class TrafficMonitorWidget(QWidget):
     def _populate_overview_recent_sessions(self) -> None:
         if self._store is None or not hasattr(self, "overview_recent_table"):
             return
-        end_date = date.today().isoformat()
-        start_date = (date.today() - timedelta(days=30)).isoformat()
-        rows = self._store.get_sessions_for_range(start_date, end_date)[-5:]
+        rows = self._store.get_recent_sessions(days=30, limit=5)
         rows.reverse()
         self.overview_status_label.setVisible(self._current_session_id is None)
         self.overview_recent_table.setRowCount(len(rows))
@@ -1587,14 +1662,12 @@ class TrafficMonitorWidget(QWidget):
             netmon_provider=provider,
         )
         save_traffic_settings(self._settings)
-        if self._store is not None:
-            self._store.cleanup_old_samples(self._settings.detailed_retention_days)
         if self._settings.app_tracking_enabled:
             self._netmon_client.start_tracking()
         else:
             self._netmon_client.stop_tracking()
         self.settings_changed.emit(self._settings)
-        self.refresh()
+        self.refresh_visible_tab(force=True)
 
     def _on_history_export_clicked(self) -> None:
         if self._store is None:
@@ -1622,11 +1695,26 @@ class TrafficMonitorWidget(QWidget):
         if not path:
             return
         if export_kind == "sessions":
-            self._store.export_session_summary_csv(path, start_date=start_date, end_date=end_date)
+            self._start_export(
+                lambda: self._store.export_session_summary_csv(
+                    path,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+            )
         elif export_kind == "samples":
-            self._store.export_session_samples_csv(path, session_id=str(self._selected_history_session_id))
+            session_id = str(self._selected_history_session_id)
+            self._start_export(
+                lambda: self._store.export_session_samples_csv(path, session_id=session_id)
+            )
         else:
-            self._store.export_daily_summary_csv(path, start_date=start_date, end_date=end_date)
+            self._start_export(
+                lambda: self._store.export_daily_summary_csv(
+                    path,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+            )
 
     def _on_export_clicked(self) -> None:
         if self._store is None:
@@ -1639,7 +1727,24 @@ class TrafficMonitorWidget(QWidget):
         )
         if not path:
             return
-        self._store.export_csv(path, range_days=365)
+        self._start_export(lambda: self._store.export_csv(path, range_days=365))
+
+    def _start_export(self, fn: Callable[[], object]) -> None:
+        if self._export_in_flight:
+            QMessageBox.information(self, "Export Traffic CSV", "A traffic export is already running.")
+            return
+        self._export_in_flight = True
+        worker = TrafficTaskWorker(fn)
+        worker.signals.result.connect(self._on_export_finished)
+        worker.signals.error.connect(self._on_export_error)
+        self._thread_pool.start(worker)
+
+    def _on_export_finished(self, _result: object) -> None:
+        self._export_in_flight = False
+
+    def _on_export_error(self, message: str) -> None:
+        self._export_in_flight = False
+        self.store_error_label.setText(message)
 
     def _on_clear_history_clicked(self) -> None:
         if self._store is None:
@@ -1654,4 +1759,7 @@ class TrafficMonitorWidget(QWidget):
         if result != QMessageBox.StandardButton.Yes:
             return
         self._store.clear_history(include_app_tracking=True)
-        self.refresh()
+        self._history_table_signature = None
+        self._sessions_table_signature = None
+        self._session_detail_cache.clear()
+        self.refresh_visible_tab(force=True)

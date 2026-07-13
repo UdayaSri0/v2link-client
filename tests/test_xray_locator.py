@@ -20,6 +20,7 @@ def test_xray_locator_finds_dev_bundled_xray(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(locator.platform, "machine", lambda: "x86_64")
     monkeypatch.setattr(locator, "load_xray_settings", lambda: XraySettings())
     monkeypatch.setattr(locator, "system_which", lambda _name: None)
+    monkeypatch.setenv("V2LINK_BUNDLED_XRAY_DIR", str(fake.parent))
 
     result = locator.find_xray_binary()
 
