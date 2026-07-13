@@ -139,6 +139,10 @@ pip install -r requirements.txt
 ./scripts/dev_run.sh
 ```
 
+For editable installs, architecture notes, important runtime invariants, tests,
+packaging, isolated XDG environments, and contribution guidance, see the
+[Developer guide](docs/development.md).
+
 ## Local Build Instructions
 
 Build AppImage only:
