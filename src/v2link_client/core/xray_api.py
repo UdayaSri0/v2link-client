@@ -55,7 +55,7 @@ def statsquery(
         cmd += ["-reset"]
 
     env, env_info = build_host_subprocess_env()
-    logger.info(
+    logger.debug(
         "Running xray api command: %s [env_mode=%s removed_env=%s]",
         cmd,
         env_info.mode,
