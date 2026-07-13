@@ -19,10 +19,10 @@ def test_get_semver_normalizes_installed_metadata(monkeypatch) -> None:
 
 def test_get_semver_prefers_pyproject_over_installed_metadata(monkeypatch) -> None:
     monkeypatch.setattr(version_mod.metadata, "version", lambda _name: "9.9.9.9.9")
-    monkeypatch.setattr(version_mod, "_read_pyproject_version", lambda: "0.2.0")
+    monkeypatch.setattr(version_mod, "_read_pyproject_version", lambda: "0.2.1")
     version_mod.get_version.cache_clear()
 
-    assert version_mod.get_semver() == "0.2.0"
+    assert version_mod.get_semver() == "0.2.1"
 
 
 def test_get_semver_falls_back_to_env_version(monkeypatch) -> None:

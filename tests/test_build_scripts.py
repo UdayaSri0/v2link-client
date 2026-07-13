@@ -10,7 +10,7 @@ def test_project_version_is_release_target() -> None:
     import tomllib
 
     data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    assert data["project"]["version"] == "0.2.0"
+    assert data["project"]["version"] == "0.2.1"
 
 
 def test_fetch_xray_script_pins_official_release_and_sha() -> None:

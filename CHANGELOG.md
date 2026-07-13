@@ -1,14 +1,5 @@
 # Changelog
 
-## Unreleased
-
-- Hardened application shutdown into an ordered, idempotent flow that invalidates late callbacks, finalises traffic persistence, restores owned proxy state, drains storage, and bounds worker waits.
-- Launch and reap GUI-owned Xray and temporary stats-query children in private process groups, with TERM-to-KILL escalation that never targets unrelated system Xray or `v2link-netmon`.
-- Disabled Xray access logging by default and bounded Xray stdout to 2 MiB with two backups; detailed bounded diagnostic logging is now opt-in.
-- Added cached performance diagnostics for polling, callbacks, storage, refreshes, chart bounds, database/WAL sizes, aggregate counts, owned PIDs, proxy backend, and netmon state without exposing private profile data.
-- Added `scripts/diagnose_runtime_performance.sh`, a read-only, non-root inspection tool for process, resource, database, log, and service state.
-- Moved proxy drift reconciliation fully into the background audit worker.
-
 All notable changes to this project are documented in this file.
 
 ## [Unreleased]
@@ -18,6 +9,39 @@ All notable changes to this project are documented in this file.
 ### Changed
 
 ### Fixed
+
+## [0.2.1] - 2026-07-14
+
+### Added
+- Added a bounded traffic-storage worker for recurring sample writes, retention cleanup, and session finalisation outside the GUI thread.
+- Added bounded aggregate and downsampled query paths for long-session Traffic Monitor views.
+
+### Changed
+- Live stats callbacks now update in-memory counters and labels only; History, Applications, Profiles, and Diagnostics refresh independently when needed.
+- Xray Stats API polling now permits at most one in-flight stats-query child and ignores late results from invalidated generations.
+- Traffic history sections cache unchanged results, completed session details are reused, and proxy drift reconciliation runs in the background audit worker.
+
+### Fixed
+- Hardened application shutdown into an ordered, idempotent flow that stops timers, invalidates late callbacks, persists final counters, finalises the active session, restores session-owned proxy state, and drains storage within bounded waits.
+- GUI-owned Xray and temporary stats-query children now run in private process groups and are reaped with bounded TERM-to-KILL escalation without targeting unrelated system Xray or `v2link-netmon.service`.
+- Detailed-sample retention and cleanup now preserve daily, session, and profile summaries while safely reusing SQLite connections.
+- Xray access logging is disabled by default, `xray_stdout.log` is bounded to 2 MiB with two backups, and detailed bounded diagnostics are opt-in.
+
+### Performance
+- Automatic traffic charts use peak-preserving downsampling and never query or render more than 900 points.
+- Long-session history tables avoid full sample scans and reuse unchanged results.
+- Recurring stats-query logging and live refresh work are reduced to keep CPU, memory, database, and log growth bounded during long sessions.
+
+### Diagnostics
+- Added cached performance diagnostics for polling, callbacks, storage, refreshes, chart bounds, database/WAL sizes, aggregate counts, owned PIDs, proxy backend, and netmon state without exposing private profile data.
+- Added `scripts/diagnose_runtime_performance.sh`, a read-only, non-root inspection tool for process, resource, database, log, and service state.
+
+### Testing
+- Added long-session regression coverage for the Traffic Monitor hot path, bounded storage, retention, connection reuse, charts, process ownership, Stats API polling, and repeated shutdown.
+- Added packaging-script, logging, diagnostics, Xray configuration, and bundled-Xray locator regression coverage.
+
+### Documentation
+- Documented source development, bounded Traffic Monitor operations, runtime performance troubleshooting, logging limits, diagnostics privacy, and lifecycle ownership rules.
 
 ## [0.2.0] - 2026-05-26
 
