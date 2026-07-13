@@ -157,6 +157,8 @@ class TrafficMonitorWidget(QWidget):
         self._selected_history_session_id: str | None = None
         self._history_daily_rows: list[DailyUsageBreakdown] = []
         self._history_session_rows: list[ProxySessionSummary] = []
+        self._history_table_signature: object | None = None
+        self._sessions_table_signature: object | None = None
         self._last_live_sample: ProxyTrafficSample | None = None
         self._last_warning: str | None = None
         self._layout_mode = "normal"
@@ -1226,6 +1228,10 @@ class TrafficMonitorWidget(QWidget):
 
         rows = self._history_daily_rows
         self._update_history_summary(rows, self._history_session_rows)
+        signature = (start_date, end_date, tuple(rows), tuple(self._history_session_rows))
+        if signature == self._history_table_signature:
+            return
+        self._history_table_signature = signature
         self.history_empty_label.setVisible(not rows)
         self.history_table.setVisible(bool(rows))
         self.daily_chart.set_data(rows)
@@ -1338,6 +1344,10 @@ class TrafficMonitorWidget(QWidget):
             return
         rows = self._store.get_sessions_for_date(self._selected_history_date)
         self._history_session_rows = rows
+        signature = (self._selected_history_date, tuple(rows))
+        if signature == self._sessions_table_signature:
+            return
+        self._sessions_table_signature = signature
         self.sessions_table.blockSignals(True)
         self.sessions_table.setSortingEnabled(False)
         self.sessions_table.setRowCount(len(rows))
@@ -1657,7 +1667,7 @@ class TrafficMonitorWidget(QWidget):
         else:
             self._netmon_client.stop_tracking()
         self.settings_changed.emit(self._settings)
-        self.refresh()
+        self.refresh_visible_tab(force=True)
 
     def _on_history_export_clicked(self) -> None:
         if self._store is None:
@@ -1749,4 +1759,7 @@ class TrafficMonitorWidget(QWidget):
         if result != QMessageBox.StandardButton.Yes:
             return
         self._store.clear_history(include_app_tracking=True)
-        self.refresh()
+        self._history_table_signature = None
+        self._sessions_table_signature = None
+        self._session_detail_cache.clear()
+        self.refresh_visible_tab(force=True)
