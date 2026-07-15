@@ -1,40 +1,51 @@
 # v2link-client
 
-Linux desktop client for V2Ray-style links, built with Python 3.11+ and PyQt6, powered by Xray-core.
+A focused Linux desktop client for V2Ray-style links, built with Python 3.11+, PyQt6, and Xray-core.
 
-Current release target: **v0.2.1**
+**Current release:** v0.2.1 · **Status:** Beta (stable for daily use with a focused feature scope)
 
-Project status: **beta** (stable for daily use, focused feature scope).
+[Download the latest release](https://github.com/UdayaSri0/v2link-client/releases/latest) · [Changelog](CHANGELOG.md) · [Developer guide](docs/development.md)
 
 ## Screenshots
 
 <p>
-  <img src="images/app-dark.png" width="900" alt="v2link-client (Dark)" />
+  <img src="images/readme-dark-v0.2.1.png" width="900" alt="v2link-client v0.2.1 Traffic Monitor history in dark mode" />
 </p>
 
 <p>
-  <img src="images/app-light.png" width="900" alt="v2link-client (Light)" />
+  <img src="images/readme-light-v0.2.1.png" width="900" alt="v2link-client v0.2.1 Traffic Monitor history in light mode" />
 </p>
+
+The v0.2.1 History view shows local daily totals, session summaries, and a bounded, peak-preserving session chart. Screenshot connection details are placeholders.
+
+## What's New in v0.2.1
+
+- A bounded background storage worker keeps recurring SQLite writes off the GUI thread.
+- Live statistics, Traffic Monitor tabs, history queries, and diagnostics now refresh independently to keep long sessions responsive.
+- Automatic session charts preserve traffic peaks while querying and rendering no more than 900 points.
+- Ordered, repeat-safe shutdown saves final traffic state, restores session-owned proxy settings, and reaps only processes started by the GUI.
+- Application and Xray logs rotate within documented limits; detailed Xray diagnostic logging is opt-in.
+- Privacy-safe diagnostics report runtime performance, database/log sizes, process ownership, proxy state, and netmon readiness without exposing profile secrets.
+
+See the [v0.2.1 release notes](docs/releases/v0.2.1.md) for the complete upgrade and packaging details.
 
 ## Key Features
 
-- Validate and run `vless://` links through Xray-core
-- Save/manage multiple profiles (favorite/default/duplicate/edit/delete)
-- Validation persistence for saved profiles (no unnecessary revalidation)
-- Local SOCKS5 + HTTP proxy endpoints (auto-select free ports when needed)
-- Optional desktop system-proxy apply/restore while running
-- Health indicator + ping + speed test + traffic/uptime metrics
-- Traffic Monitor dashboard with Overview, Applications, Proxy Profiles, History, Settings, and Diagnostics tabs
-- Local SQLite proxy/profile traffic history with daily totals, profile totals, session history, charts, and CSV export
-- Optional per-application tracking preparation through the advanced `v2link-netmon` helper path
-- Diagnostics panel with runtime proxy state and log access
-- Cached performance diagnostics and a read-only runtime inspection script
-- Built-in update check against GitHub Releases
-- Light/Dark theme
+- Validate and run `vless://` profiles through a bundled, custom, or system Xray-core.
+- Save multiple profiles with favorites, a default profile, duplication, editing, deletion, and validation that persists across restarts.
+- Expose local SOCKS5 and HTTP proxies, automatically selecting free ports when the defaults are unavailable.
+- Optionally apply, audit, repair, and safely restore supported desktop system-proxy settings while connected.
+- Check connection health, server latency, proxy download speed, uptime, live throughput, and cumulative traffic.
+- Explore Overview, Applications, Proxy Profiles, History, Settings, and Diagnostics in the Traffic Monitor.
+- Store traffic locally in SQLite with daily/monthly totals, per-profile usage, session drill-down, charts, configurable retention, and CSV exports.
+- Keep long-running monitoring responsive with bounded background persistence, cached history sections, and peak-preserving chart downsampling.
+- Inspect Xray, proxy, traffic database, process ownership, and optional `v2link-netmon` helper readiness without running the GUI as root.
+- Check GitHub Releases for updates and switch between light and dark themes.
 
 ## Runtime Requirements
 
-- Linux desktop environment (GNOME/KDE/etc.)
+- Linux desktop environment (GNOME, KDE, or another desktop that can use the local manual proxy endpoints)
+- `x86_64` or `aarch64` system
 
 Official AppImage, `.deb`, and APT releases include bundled Xray-core for normal operation. Source builds may use bundled vendor files from `./scripts/fetch_xray_core.sh` or a system `xray` from `PATH` as a fallback.
 
@@ -51,9 +62,10 @@ Also available for Debian/Ubuntu users:
 
 ## Install from AppImage
 
-1. Download the latest AppImage from GitHub Releases.
+1. Download the AppImage from the [latest GitHub release](https://github.com/UdayaSri0/v2link-client/releases/latest).
 
 Expected artifact name pattern:
+
 - `v2link-client-<version>-linux-<arch>.AppImage`
 - `<arch>` is `x86_64` or `aarch64`
 
@@ -86,9 +98,10 @@ Terminal=false
 
 ## Install from `.deb`
 
-1. Download the latest `.deb` from GitHub Releases.
+1. Download the `.deb` from the [latest GitHub release](https://github.com/UdayaSri0/v2link-client/releases/latest).
 
 Expected artifact name pattern:
+
 - `v2link-client_<version>_<arch>.deb`
 - `<arch>` is `amd64` or `arm64`
 
@@ -190,6 +203,7 @@ git push origin v<version>
 ```
 
 5. GitHub Actions workflow `.github/workflows/release.yml` will:
+
 - verify `tag version == pyproject version`
 - build AppImage + `.deb` + `SHA256SUMS`
 - upload artifacts to GitHub Release
@@ -232,7 +246,7 @@ The Traffic Monitor records local traffic history and shows:
 - Daily history with Today, Last 7 days, Last 30 days, This month, and custom date ranges
 - Session history for each selected date, including start/end time, duration, profile, download, upload, total, average speed, and status
 - Session drill-down charts for speed or cumulative usage over time
-- Advanced **Applications** tab for future per-application tracking
+- Advanced **Applications** tab with optional helper-readiness and attribution diagnostics
 - Settings for detailed sample retention, CSV export, and clearing local traffic history
 - Diagnostics for the stats API, helper readiness, and local traffic database
 
@@ -273,15 +287,15 @@ sudo systemctl enable --now v2link-netmon
 sudo systemctl disable --now v2link-netmon
 ```
 
-The helper exposes read-only JSON stats over `/run/v2link-client/netmon.sock`. In v0.2.0 this path is prepared/scaffolded and remains optional; if the helper, permissions, or eBPF backend are unavailable, the GUI stays unprivileged and shows a clear unavailable/diagnostic state.
+The helper exposes read-only JSON stats over `/run/v2link-client/netmon.sock`. In v0.2.1 this integration remains a prepared, optional path rather than guaranteed full attribution. If the helper, permissions, or eBPF backend are unavailable, the GUI stays unprivileged and shows a clear unavailable/diagnostic state.
 
 ## Privacy
 
-Traffic history never leaves your machine. Proxy/profile stats come from Xray counters. Application traffic tracking records local process names, executable paths, UIDs, and byte counters only. It does not decrypt traffic, inspect packet payloads, read messages, collect tokens/cookies, or upload telemetry anywhere.
+Traffic history never leaves your machine. Proxy/profile stats come from Xray counters. When optional application attribution is available, it records only local process names, executable paths, UIDs, and byte counters. It does not decrypt traffic, inspect packet payloads, read messages, collect tokens/cookies, or upload telemetry anywhere.
 
 ## Limitations
 
-Per-application attribution is not perfect when a local proxy is involved. When system proxy is enabled, apps may connect to `127.0.0.1` while Xray performs the encrypted remote connection, so some traffic can appear under `Xray Core / Proxy Tunnel`. Xray is shown separately and is not hidden.
+Per-application attribution, when available, is not perfect with a local proxy. When system proxy is enabled, apps may connect to `127.0.0.1` while Xray performs the encrypted remote connection, so some traffic can appear under `Xray Core / Proxy Tunnel`. Xray is shown separately and is not hidden.
 
 ## Troubleshooting Traffic Monitor
 
@@ -318,8 +332,6 @@ Not yet implemented:
 - Runtime state and logs: `$XDG_STATE_HOME/v2link-client/` (logs are in `logs/`)
 
 Unset XDG variables use the normal Linux defaults under `~/.config`, `~/.local/share`, and `~/.local/state`. To stop detailed sample growth, turn off proxy/profile history in **Traffic Monitor → Settings**; aggregate display still remains available for the live session.
-- Runtime state and generated config: `~/.local/state/v2link-client/`
-- Logs: `~/.local/state/v2link-client/logs/`
 
 ## Troubleshooting
 
