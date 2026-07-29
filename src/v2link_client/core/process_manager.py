@@ -24,7 +24,7 @@ from v2link_client.core.errors import (
 )
 from v2link_client.core.storage import get_logs_dir
 from v2link_client.core.owned_process import terminate_owned_process
-from v2link_client.core.system_subprocess import build_host_subprocess_env
+from v2link_client.core.system_subprocess import build_xray_subprocess_env
 from v2link_client.core.xray_locator import (
     MISSING_XRAY_MESSAGE,
     XrayBinary,
@@ -82,7 +82,7 @@ def validate_xray_config(xray: CoreBinary, config_path: Path, *, timeout_s: floa
             user_message=xray.error or MISSING_XRAY_MESSAGE,
         )
     cmd = [xray.path, "run", "-test", "-c", str(config_path)]
-    env, env_info = build_host_subprocess_env()
+    env, env_info = build_xray_subprocess_env(xray.path)
     logger.info(
         "Validating xray config: %s [env_mode=%s removed_env=%s]",
         cmd,
@@ -185,7 +185,7 @@ class XrayProcessManager:
         _bound_existing_log(logs_dir / "xray_error.log")
 
         cmd = [xray.path, "run", "-c", str(config_path)]
-        env, env_info = build_host_subprocess_env()
+        env, env_info = build_xray_subprocess_env(xray.path)
         try:
             self._proc = subprocess.Popen(
                 cmd,

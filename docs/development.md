@@ -77,6 +77,10 @@ To fetch the pinned release and geo assets used by packaging:
 ./scripts/fetch_xray_core.sh
 ```
 
+`./scripts/dev_run.sh` verifies the native vendor directory and fetches the pinned
+official release once when needed. Set `V2LINK_SKIP_XRAY_FETCH=1` to disable network
+bootstrap; the script then prints the exact manual fetch command.
+
 Never replace the pinned version or checksums without reviewing Xray release notes and updating the associated tests and third-party notices.
 
 ## Repository map

@@ -82,13 +82,17 @@ https://github.com/XTLS/Xray-core/releases
 
 To update the pinned release:
 
-1. Edit `scripts/fetch_xray_core.sh`.
-2. Set `XRAY_VERSION`.
-3. Set `XRAY_SHA256_X86_64` and `XRAY_SHA256_AARCH64` to the official archive digests.
+1. Edit `packaging/xray-release.json`.
+2. Set the pinned stable `version`.
+3. Set the official archive filename and SHA-256 for each architecture.
 4. Run `./scripts/fetch_xray_core.sh` on each release architecture or with `ARCH=x86_64` / `ARCH=aarch64`.
 5. Run `./scripts/build_release.sh`.
 
 The fetch script fails if checksums are placeholders or if the archive structure no longer contains `xray`, `geoip.dat`, `geosite.dat`, and `LICENSE`.
+
+Official v0.2.2 binary artifacts target x86-64. The aarch64 mapping and runtime
+discovery remain available for source development, but ARM64 packages must not be
+published until they are built and verified in native ARM64 CI.
 
 ## Licensing
 

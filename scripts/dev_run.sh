@@ -8,6 +8,27 @@ REQUIREMENTS_FILE="${ROOT_DIR}/requirements.txt"
 
 export PYTHONPATH="${ROOT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
+normalize_arch() {
+  case "$(uname -m)" in
+    x86_64 | amd64) echo "x86_64" ;;
+    aarch64 | arm64) echo "aarch64" ;;
+    *) echo "Error: unsupported architecture $(uname -m)" >&2; exit 1 ;;
+  esac
+}
+
+XRAY_ARCH="$(normalize_arch)"
+XRAY_VENDOR_DIR="${ROOT_DIR}/vendor/xray/${XRAY_ARCH}"
+if ! ARCH="${XRAY_ARCH}" "${ROOT_DIR}/scripts/fetch_xray_core.sh" --verify-existing >/dev/null 2>&1; then
+  if [[ "${V2LINK_SKIP_XRAY_FETCH:-0}" == "1" ]]; then
+    echo "Xray-core has not been prepared for this source checkout." >&2
+    echo "Run: ARCH=${XRAY_ARCH} ./scripts/fetch_xray_core.sh" >&2
+    exit 1
+  fi
+  echo "Preparing the pinned official Xray-core release for ${XRAY_ARCH}..."
+  ARCH="${XRAY_ARCH}" "${ROOT_DIR}/scripts/fetch_xray_core.sh"
+fi
+export V2LINK_BUNDLED_XRAY_DIR="${XRAY_VENDOR_DIR}"
+
 if [[ ! -x "${VENV_PYTHON}" ]]; then
   if command -v python3 >/dev/null 2>&1; then
     BOOTSTRAP_PYTHON="python3"

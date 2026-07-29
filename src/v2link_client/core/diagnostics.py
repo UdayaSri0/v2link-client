@@ -169,8 +169,17 @@ def _append_runtime_state(lines: list[str], state: Any) -> None:
             lines.append(f"- Xray path: {resolved_path}")
         if xray.get("version"):
             lines.append(f"- Xray version: {xray.get('version')}")
+        lines.append(f"- Application architecture: {platform.machine() or 'unknown'}")
+        lines.append(f"- Xray architecture: {xray.get('architecture') or 'unknown'}")
+        if xray.get("asset_dir"):
+            lines.append(f"- Xray asset directory: {xray.get('asset_dir')}")
+        lines.append(
+            f"- Xray version manifest: {xray.get('version_manifest_status') or 'unavailable'}"
+        )
         if xray.get("error"):
             lines.append(f"- Xray error: {xray.get('error')}")
+        if xray.get("warning"):
+            lines.append(f"- Xray warning: {xray.get('warning')}")
         geoip_found = bool(xray.get("geoip_found"))
         geosite_found = bool(xray.get("geosite_found"))
         lines.append(

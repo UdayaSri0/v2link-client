@@ -120,6 +120,17 @@ def build_host_subprocess_env(
     return env, info
 
 
+def build_xray_subprocess_env(
+    binary_path: str | Path,
+    base_env: Mapping[str, str] | None = None,
+) -> tuple[dict[str, str], HostSubprocessEnvInfo]:
+    """Build the clean host environment used by every Xray child process."""
+
+    env, info = build_host_subprocess_env(base_env=base_env)
+    env["XRAY_LOCATION_ASSET"] = str(Path(binary_path).expanduser().resolve(strict=False).parent)
+    return env, info
+
+
 def get_host_subprocess_env_info(base_env: Mapping[str, str] | None = None) -> HostSubprocessEnvInfo:
     _, info = build_host_subprocess_env(base_env=base_env)
     return info

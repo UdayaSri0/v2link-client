@@ -2,7 +2,7 @@
 
 A focused Linux desktop client for V2Ray-style links, built with Python 3.11+, PyQt6, and Xray-core.
 
-**Current release:** v0.2.1 · **Status:** Beta (stable for daily use with a focused feature scope)
+**Current release:** v0.2.2 · **Status:** Beta (stable for daily use with a focused feature scope)
 
 [Download the latest release](https://github.com/UdayaSri0/v2link-client/releases/latest) · [Changelog](CHANGELOG.md) · [Developer guide](docs/development.md)
 
@@ -45,7 +45,8 @@ See the [v0.2.1 release notes](docs/releases/v0.2.1.md) for the complete upgrade
 ## Runtime Requirements
 
 - Linux desktop environment (GNOME, KDE, or another desktop that can use the local manual proxy endpoints)
-- `x86_64` or `aarch64` system
+- `x86_64` system for official AppImage and Debian/APT packages
+- `aarch64` source support is retained, but official ARM64 artifacts await native CI
 
 Official AppImage, `.deb`, and APT releases include bundled Xray-core for normal operation. Source builds may use bundled vendor files from `./scripts/fetch_xray_core.sh` or a system `xray` from `PATH` as a fallback.
 
@@ -67,7 +68,7 @@ Also available for Debian/Ubuntu users:
 Expected artifact name pattern:
 
 - `v2link-client-<version>-linux-<arch>.AppImage`
-- `<arch>` is `x86_64` or `aarch64`
+- the currently published official architecture is `x86_64`
 
 2. Make executable and run:
 
@@ -181,6 +182,14 @@ The release build fetches a pinned official Xray-core release into `vendor/xray/
 ```bash
 ./scripts/fetch_xray_core.sh
 ```
+
+Developers can normally use `./scripts/dev_run.sh`; it fetches and verifies the pinned
+official release once when the native vendor copy is missing. Disable that network
+bootstrap with `V2LINK_SKIP_XRAY_FETCH=1 ./scripts/dev_run.sh`.
+
+GitHub's automatically generated **Source code** ZIP and tar.gz files are not prebuilt
+Linux applications. Ordinary users should download the named AppImage or `.deb`, both
+of which contain Xray-core and its geo assets.
 
 Artifacts are written to `dist/`:
 

@@ -1,0 +1,14 @@
+{
+  "version": "v26.3.27",
+  "source": "https://github.com/XTLS/Xray-core",
+  "assets": {
+    "x86_64": {
+      "filename": "Xray-linux-64.zip",
+      "sha256": "23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae"
+    },
+    "aarch64": {
+      "filename": "Xray-linux-arm64-v8a.zip",
+      "sha256": "4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c"
+    }
+  }
+}

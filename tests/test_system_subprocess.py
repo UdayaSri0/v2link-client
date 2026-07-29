@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from v2link_client.core.system_subprocess import build_host_subprocess_env
+from v2link_client.core.system_subprocess import (
+    build_host_subprocess_env,
+    build_xray_subprocess_env,
+)
 
 
 def test_build_host_subprocess_env_strips_packaged_runtime_vars() -> None:
@@ -46,3 +49,11 @@ def test_build_host_subprocess_env_strips_packaged_runtime_vars() -> None:
     assert "GIO_MODULE_DIR" in info.removed_keys
     assert "LD_LIBRARY_PATH" in info.removed_keys
     assert "PYINSTALLER_SUPPRESS_SPLASH_SCREEN" in info.removed_keys
+
+
+def test_build_xray_subprocess_env_sets_binary_asset_directory(tmp_path) -> None:
+    binary = tmp_path / "path with spaces" / "xray"
+    env, _info = build_xray_subprocess_env(binary, {"HOME": "/home/test"})
+
+    assert env["XRAY_LOCATION_ASSET"] == str(binary.parent.resolve())
+    assert env["HOME"] == "/home/test"

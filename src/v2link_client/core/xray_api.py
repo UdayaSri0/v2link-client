@@ -16,7 +16,7 @@ import threading
 from typing import Final
 
 from v2link_client.core.errors import AppError, BinaryMissingError, PermissionDeniedError
-from v2link_client.core.system_subprocess import build_host_subprocess_env
+from v2link_client.core.system_subprocess import build_xray_subprocess_env
 from v2link_client.core.owned_process import terminate_owned_process
 
 
@@ -85,7 +85,7 @@ def _statsquery_owned(
     if reset:
         cmd += ["-reset"]
 
-    env, env_info = build_host_subprocess_env()
+    env, env_info = build_xray_subprocess_env(xray_path)
     logger.debug(
         "Running xray api command: %s [env_mode=%s removed_env=%s]",
         cmd,

@@ -86,6 +86,8 @@ fi
 
 cd "${DIST_DIR}"
 sha256sum ./*.AppImage ./*.deb > SHA256SUMS
+cd "${ROOT_DIR}"
+"${ROOT_DIR}/scripts/verify_release_artifacts.sh"
 
 echo "Release artifacts:"
 ls -1 "${DIST_DIR}"

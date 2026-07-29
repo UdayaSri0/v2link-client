@@ -9,6 +9,9 @@ PYINSTALLER_DIR="${DIST_DIR}/${APP_NAME}"
 DESKTOP_SRC="${ROOT_DIR}/packaging/app.desktop"
 ICON_SRC="${ROOT_DIR}/packaging/icon.png"
 TOOLS_DIR="${ROOT_DIR}/tools"
+APPIMAGETOOL_VERSION="12"
+APPIMAGETOOL_SHA256_X86_64="d918b4df547b388ef253f3c9e7f6529ca81a885395c31f619d9aaf7030499a13"
+APPIMAGETOOL_SHA256_AARCH64="c9d058310a4e04b9fbbd81340fff2b5fb44943a630b31881e321719f271bd41a"
 
 if [[ ! -d "${PYINSTALLER_DIR}" ]]; then
   "${ROOT_DIR}/scripts/build_pyinstaller.sh"
@@ -72,20 +75,29 @@ resolve_appimagetool() {
 
   local arch
   arch="$(normalize_arch)"
-  local url
+  local url expected_sha
   case "${arch}" in
-    x86_64) url="https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage" ;;
-    aarch64) url="https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-aarch64.AppImage" ;;
+    x86_64)
+      url="https://github.com/AppImage/AppImageKit/releases/download/${APPIMAGETOOL_VERSION}/appimagetool-x86_64.AppImage"
+      expected_sha="${APPIMAGETOOL_SHA256_X86_64}"
+      ;;
+    aarch64)
+      url="https://github.com/AppImage/AppImageKit/releases/download/${APPIMAGETOOL_VERSION}/appimagetool-aarch64.AppImage"
+      expected_sha="${APPIMAGETOOL_SHA256_AARCH64}"
+      ;;
     *) echo "Error: unsupported architecture ${arch}" >&2; exit 1 ;;
   esac
 
   mkdir -p "${TOOLS_DIR}"
-  local target="${TOOLS_DIR}/appimagetool-${arch}.AppImage"
-  if [[ ! -x "${target}" ]]; then
+  local target="${TOOLS_DIR}/appimagetool-${APPIMAGETOOL_VERSION}-${arch}.AppImage"
+  if [[ ! -f "${target}" ]] || ! printf '%s  %s\n' "${expected_sha}" "${target}" | sha256sum -c - >/dev/null 2>&1; then
     echo "Downloading appimagetool..." >&2
-    curl -fsSL "${url}" -o "${target}"
-    chmod +x "${target}"
+    local temporary="${target}.download"
+    curl --fail --location --silent --show-error --retry 4 --retry-all-errors "${url}" -o "${temporary}"
+    printf '%s  %s\n' "${expected_sha}" "${temporary}" | sha256sum -c - >&2
+    mv "${temporary}" "${target}"
   fi
+  chmod 0755 "${target}"
 
   echo "${target}"
 }

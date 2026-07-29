@@ -545,6 +545,7 @@ class MainWindow(QMainWindow):
         browse_button = QPushButton("Browse")
         reset_button = QPushButton("Reset to bundled/default")
         validate_button = QPushButton("Validate")
+        self_test_button = QPushButton("Test Xray installation")
         save_button = QPushButton("Save")
         cancel_button = QPushButton("Cancel")
         status_label = QLabel("")
@@ -559,6 +560,7 @@ class MainWindow(QMainWindow):
         button_row.addWidget(reset_button)
         button_row.addStretch(1)
         button_row.addWidget(validate_button)
+        button_row.addWidget(self_test_button)
         button_row.addWidget(cancel_button)
         button_row.addWidget(save_button)
 
@@ -601,6 +603,36 @@ class MainWindow(QMainWindow):
             update_enabled()
             validate_current()
 
+        def run_self_test() -> None:
+            result = validate_current()
+            if not result.valid or not result.path:
+                QMessageBox.warning(dialog, "Xray Self-Test", result.error or "Xray-core is unavailable.")
+                return
+            assets = xray_asset_status(result)
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".json", encoding="utf-8", delete=False
+                ) as handle:
+                    handle.write(
+                        '{"log":{"loglevel":"none"},"inbounds":[],'
+                        '"outbounds":[{"protocol":"freedom","settings":{}}]}'
+                    )
+                    config_path = Path(handle.name)
+                try:
+                    validate_xray_config(result, config_path)
+                finally:
+                    config_path.unlink(missing_ok=True)
+            except AppError as exc:
+                QMessageBox.warning(dialog, "Xray Self-Test", exc.user_message)
+                return
+            QMessageBox.information(
+                dialog,
+                "Xray Self-Test",
+                f"Xray-core {result.version or ''} passed offline configuration validation.\n"
+                f"geoip.dat: {'Found' if assets['geoip_found'] else 'Missing'}\n"
+                f"geosite.dat: {'Found' if assets['geosite_found'] else 'Missing'}",
+            )
+
         def save_current() -> None:
             if custom_checkbox.isChecked():
                 result = validate_current()
@@ -635,6 +667,7 @@ class MainWindow(QMainWindow):
         browse_button.clicked.connect(choose_file)
         reset_button.clicked.connect(reset_default)
         validate_button.clicked.connect(validate_current)
+        self_test_button.clicked.connect(run_self_test)
         save_button.clicked.connect(save_current)
         cancel_button.clicked.connect(dialog.reject)
 
@@ -1924,8 +1957,10 @@ class MainWindow(QMainWindow):
                 "binary_path": self._process.binary_path,
                 "resolved_path": xray_resolution.path,
                 "version": xray_resolution.version,
+                "architecture": xray_resolution.architecture,
                 "valid": xray_resolution.valid,
                 "error": xray_resolution.error,
+                "warning": xray_resolution.warning,
                 "bundled_missing_in_packaged_build": (
                     detect_runtime_kind() in {"appimage", "deb"} and xray_resolution.source != "bundled"
                 ),

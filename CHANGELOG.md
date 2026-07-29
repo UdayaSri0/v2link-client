@@ -10,6 +10,20 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+## [0.2.2] - 2026-07-29
+
+### Added
+- Added a canonical Xray release manifest, verification-only vendor checks, offline GUI self-test, and extracted AppImage/Debian artifact verification.
+
+### Changed
+- Source startup bootstraps the pinned official Xray release unless `V2LINK_SKIP_XRAY_FETCH=1`.
+- All Xray child commands now use a clean host environment with `XRAY_LOCATION_ASSET` derived from the selected executable.
+- Official release artifacts currently target x86-64; ARM64 source discovery remains supported pending native package CI.
+
+### Fixed
+- Prevented source discovery from selecting an executable for the wrong CPU architecture.
+- Made Xray acquisition checksum-first, retrying, version-validated, and staged so a failed refresh cannot leave a partial vendor directory.
+
 ## [0.2.1] - 2026-07-14
 
 ### Added
