@@ -1,33 +1,225 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, without the v prefix"
+        required: true
+        type: string
+      release_channel:
+        description: "Release channel"
+        required: true
+        default: stable
+        type: choice
+        options:
+          - stable
+          - prerelease
+      publish_apt:
+        description: "Publish the verified Debian package to the APT repository"
+        required: true
+        default: true
+        type: boolean
+      dry_run:
+        description: "Build and verify without creating a tag or publishing"
+        required: true
+        default: true
+        type: boolean
+      confirmation:
+        description: "Enter RELEASE when dry_run is disabled"
+        required: false
+        type: string
+
+concurrency:
+  group: v2link-client-release
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  build-linux:
+  validate-release:
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
-    permissions:
-      contents: write
-
+    timeout-minutes: 10
+    outputs:
+      project_version: ${{ steps.validate.outputs.project_version }}
+      tag_name: ${{ steps.validate.outputs.tag_name }}
+      release_notes: ${{ steps.validate.outputs.release_notes }}
+      release_channel: ${{ steps.validate.outputs.release_channel }}
+      release_commit: ${{ steps.validate.outputs.release_commit }}
+      dry_run: ${{ steps.validate.outputs.dry_run }}
+      publish_apt: ${{ steps.validate.outputs.publish_apt }}
+      tag_state: ${{ steps.validate.outputs.tag_state }}
+      release_state: ${{ steps.validate.outputs.release_state }}
+      xray_version: ${{ steps.validate.outputs.xray_version }}
     steps:
-      - name: Checkout
+      - name: Checkout selected commit
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      - name: Validate release request and repository state
+        id: validate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          RELEASE_CHANNEL: ${{ inputs.release_channel }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          PUBLISH_APT: ${{ inputs.publish_apt }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SELECTED_BRANCH: ${{ github.ref_name }}
+          RELEASE_COMMIT: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${SELECTED_BRANCH}" != "${DEFAULT_BRANCH}" ]]; then
+            echo "Error: releases must be run from the default branch (${DEFAULT_BRANCH}), not ${SELECTED_BRANCH}." >&2
+            exit 1
+          fi
+
+          if [[ "${REQUESTED_VERSION}" == v* ]]; then
+            echo "Error: enter the version without the v prefix." >&2
+            exit 1
+          fi
+
+          PROJECT_VERSION="$(python - <<'PY'
+          from pathlib import Path
+          import tomllib
+          print(tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"])
+          PY
+          )"
+
+          python - "${REQUESTED_VERSION}" <<'PY'
+          import sys
+          from packaging.version import InvalidVersion, Version
+          value = sys.argv[1]
+          try:
+              parsed = Version(value)
+          except InvalidVersion as exc:
+              raise SystemExit(f"Error: invalid release version {value!r}: {exc}")
+          if str(parsed) != value:
+              raise SystemExit(
+                  f"Error: version must use its canonical form ({parsed}), received {value!r}."
+              )
+          PY
+
+          if [[ "${REQUESTED_VERSION}" != "${PROJECT_VERSION}" ]]; then
+            echo "Error: requested release version ${REQUESTED_VERSION} does not match pyproject.toml version ${PROJECT_VERSION}." >&2
+            echo "Prepare and merge the version update before starting the release." >&2
+            exit 1
+          fi
+
+          TAG_NAME="v${PROJECT_VERSION}"
+          RELEASE_NOTES="docs/releases/${TAG_NAME}.md"
+          if [[ ! -s "${RELEASE_NOTES}" ]]; then
+            echo "Error: matching release notes are missing or empty: ${RELEASE_NOTES}" >&2
+            exit 1
+          fi
+          if ! grep -Fq "v2link-client ${TAG_NAME}" "${RELEASE_NOTES}"; then
+            echo "Error: ${RELEASE_NOTES} does not identify ${TAG_NAME}." >&2
+            exit 1
+          fi
+          if ! grep -Eq "^## \[${PROJECT_VERSION//./\\.}\]([[:space:]]|$)" CHANGELOG.md; then
+            echo "Error: CHANGELOG.md does not contain a release heading for ${PROJECT_VERSION}." >&2
+            exit 1
+          fi
+
+          if [[ "${RELEASE_CHANNEL}" != "stable" && "${RELEASE_CHANNEL}" != "prerelease" ]]; then
+            echo "Error: unsupported release channel: ${RELEASE_CHANNEL}" >&2
+            exit 1
+          fi
+          if [[ "${DRY_RUN}" == "false" && "${CONFIRMATION}" != "RELEASE" ]]; then
+            echo "Error: publication confirmation is invalid. Enter RELEASE to start a real release." >&2
+            exit 1
+          fi
+
+          git fetch --tags origin
+          TAG_STATE="missing"
+          if git show-ref --verify --quiet "refs/tags/${TAG_NAME}"; then
+            TAG_COMMIT="$(git rev-list -n 1 "${TAG_NAME}")"
+            if [[ "${TAG_COMMIT}" != "${RELEASE_COMMIT}" ]]; then
+              echo "Error: ${TAG_NAME} already points to ${TAG_COMMIT}, not ${RELEASE_COMMIT}. The tag will not be moved." >&2
+              exit 1
+            fi
+            TAG_STATE="same-commit"
+          fi
+
+          RELEASE_STATE="missing"
+          if RELEASE_JSON="$(gh api "repos/${REPOSITORY}/releases/tags/${TAG_NAME}" 2>/dev/null)"; then
+            IS_DRAFT="$(jq -r '.draft' <<<"${RELEASE_JSON}")"
+            TARGET_COMMITISH="$(jq -r '.target_commitish // empty' <<<"${RELEASE_JSON}")"
+            if [[ "${IS_DRAFT}" != "true" ]]; then
+              echo "Error: a published release already exists for ${TAG_NAME}; it will not be modified." >&2
+              exit 1
+            fi
+            if [[ "${TAG_STATE}" != "same-commit" ]]; then
+              echo "Error: a draft release exists for ${TAG_NAME}, but its tag is missing." >&2
+              exit 1
+            fi
+            if [[ -n "${TARGET_COMMITISH}" && "${TARGET_COMMITISH}" =~ ^[0-9a-f]{40}$ && "${TARGET_COMMITISH}" != "${RELEASE_COMMIT}" ]]; then
+              echo "Error: the existing draft targets another commit (${TARGET_COMMITISH})." >&2
+              exit 1
+            fi
+            RELEASE_STATE="draft"
+          fi
+
+          XRAY_VERSION="$(python - <<'PY'
+          from pathlib import Path
+          import json
+          print(json.loads(Path("packaging/xray-release.json").read_text(encoding="utf-8"))["version"])
+          PY
+          )"
+
+          {
+            echo "project_version=${PROJECT_VERSION}"
+            echo "tag_name=${TAG_NAME}"
+            echo "release_notes=${RELEASE_NOTES}"
+            echo "release_channel=${RELEASE_CHANNEL}"
+            echo "release_commit=${RELEASE_COMMIT}"
+            echo "dry_run=${DRY_RUN}"
+            echo "publish_apt=${PUBLISH_APT}"
+            echo "tag_state=${TAG_STATE}"
+            echo "release_state=${RELEASE_STATE}"
+            echo "xray_version=${XRAY_VERSION}"
+          } >>"${GITHUB_OUTPUT}"
+
+  build-and-verify:
+    runs-on: ubuntu-22.04
+    needs: validate-release
+    timeout-minutes: 45
+    steps:
+      - name: Checkout validated commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-release.outputs.release_commit }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            curl \
+            unzip \
+            file \
+            dpkg-dev \
+            shellcheck \
             libegl1 \
             libgl1 \
             libxkbcommon-x11-0 \
@@ -37,34 +229,22 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
-
-      - name: Verify tag matches project version
-        run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          PROJECT_VERSION="$(python -c "from pathlib import Path; import tomllib; data = tomllib.loads(Path('pyproject.toml').read_text(encoding='utf-8')); print(str(data['project']['version']).strip())")"
-          if [[ -z "${PROJECT_VERSION}" ]]; then
-            echo "Error: project version is empty in pyproject.toml" >&2
-            exit 1
-          fi
-          if [[ "${TAG_VERSION}" != "${PROJECT_VERSION}" ]]; then
-            echo "Error: tag version (${TAG_VERSION}) does not match pyproject version (${PROJECT_VERSION})." >&2
-            exit 1
-          fi
-          echo "PROJECT_VERSION=${PROJECT_VERSION}" >> "${GITHUB_ENV}"
-
-      - name: Verify matching release notes exist
-        run: |
-          RELEASE_NOTES="docs/releases/v${PROJECT_VERSION}.md"
-          if [[ ! -s "${RELEASE_NOTES}" ]]; then
-            echo "Error: matching release notes file is missing or empty: ${RELEASE_NOTES}" >&2
-            exit 1
-          fi
-          echo "RELEASE_NOTES=${RELEASE_NOTES}" >> "${GITHUB_ENV}"
+          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-dev.txt
 
       - name: Run unit tests
         run: python -m pytest -v
+
+      - name: Validate packaging shell scripts
+        run: |
+          bash -n scripts/*.sh
+          bash -n packaging/deb/postinst
+          bash -n packaging/deb/postrm
+          bash -n packaging/deb/v2link-client-wrapper.in
+          shellcheck scripts/*.sh \
+            packaging/deb/postinst \
+            packaging/deb/postrm \
+            packaging/deb/v2link-client-wrapper.in
 
       - name: Fetch and verify pinned Xray-core
         run: |
@@ -72,55 +252,197 @@ jobs:
           ARCH=x86_64 ./scripts/fetch_xray_core.sh --verify-existing
 
       - name: Build release artifacts
-        run: |
-          VERSION="${PROJECT_VERSION}" ./scripts/build_release.sh
+        env:
+          VERSION: ${{ needs.validate-release.outputs.project_version }}
+        run: ./scripts/build_release.sh
 
-      - name: Upload workflow artifacts
+      - name: Verify final artifacts
+        run: |
+          ./scripts/verify_release_artifacts.sh
+          cd dist
+          sha256sum -c SHA256SUMS
+
+      - name: Enforce exact artifact names
+        env:
+          VERSION: ${{ needs.validate-release.outputs.project_version }}
+        run: |
+          test -f "dist/v2link-client-${VERSION}-linux-x86_64.AppImage"
+          test -f "dist/v2link-client_${VERSION}_amd64.deb"
+          test -f "dist/SHA256SUMS"
+          test "$(find dist -maxdepth 1 -type f -name '*.AppImage' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -type f -name '*.deb' | wc -l)" -eq 1
+
+      - name: Upload verified workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: v2link-client-linux
+          name: v2link-client-${{ needs.validate-release.outputs.project_version }}-linux-release
           path: |
-            dist/*.AppImage
-            dist/*.deb
+            dist/v2link-client-${{ needs.validate-release.outputs.project_version }}-linux-x86_64.AppImage
+            dist/v2link-client_${{ needs.validate-release.outputs.project_version }}_amd64.deb
             dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
 
-      - name: Publish GitHub release assets
-        uses: softprops/action-gh-release@v2
-        with:
-          name: v2link-client v${{ env.PROJECT_VERSION }}
-          body_path: ${{ env.RELEASE_NOTES }}
-          files: |
-            dist/*.AppImage
-            dist/*.deb
-            dist/SHA256SUMS
+      - name: Write build summary
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.validate-release.outputs.project_version }}
+          TAG_NAME: ${{ needs.validate-release.outputs.tag_name }}
+          CHANNEL: ${{ needs.validate-release.outputs.release_channel }}
+          COMMIT: ${{ needs.validate-release.outputs.release_commit }}
+          DRY_RUN: ${{ needs.validate-release.outputs.dry_run }}
+          PUBLISH_APT: ${{ needs.validate-release.outputs.publish_apt }}
+          XRAY_VERSION: ${{ needs.validate-release.outputs.xray_version }}
+        run: |
+          {
+            echo "## Verified release build"
+            echo
+            echo "| Item | Value |"
+            echo "|---|---|"
+            echo "| Version | ${VERSION} |"
+            echo "| Tag | ${TAG_NAME} |"
+            echo "| Channel | ${CHANNEL} |"
+            echo "| Commit | \`${COMMIT}\` |"
+            echo "| Dry run | ${DRY_RUN} |"
+            echo "| APT requested | ${PUBLISH_APT} |"
+            echo "| Architecture | x86-64 / amd64 |"
+            echo "| Bundled Xray | ${XRAY_VERSION} |"
+            echo "| AppImage | \`v2link-client-${VERSION}-linux-x86_64.AppImage\` |"
+            echo "| Debian | \`v2link-client_${VERSION}_amd64.deb\` |"
+            echo "| Checksums | Verified |"
+            if [[ "${DRY_RUN}" == "true" ]]; then
+              echo
+              echo "Dry run completed successfully. No tag, GitHub Release, or APT repository update was created."
+            fi
+          } >>"${GITHUB_STEP_SUMMARY}"
 
-  publish-apt-repo:
+  create-draft-release:
     runs-on: ubuntu-22.04
-    needs: build-linux
+    needs:
+      - validate-release
+      - build-and-verify
+    if: ${{ !inputs.dry_run }}
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout validated commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-release.outputs.release_commit }}
+          fetch-depth: 0
+
+      - name: Download verified workflow artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: v2link-client-${{ needs.validate-release.outputs.project_version }}-linux-release
+          path: dist
+
+      - name: Reverify artifact and release state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ needs.validate-release.outputs.project_version }}
+          TAG_NAME: ${{ needs.validate-release.outputs.tag_name }}
+          RELEASE_COMMIT: ${{ needs.validate-release.outputs.release_commit }}
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -c SHA256SUMS
+          test -f "v2link-client-${VERSION}-linux-x86_64.AppImage"
+          test -f "v2link-client_${VERSION}_amd64.deb"
+          cd ..
+
+          git fetch --tags origin
+          if git show-ref --verify --quiet "refs/tags/${TAG_NAME}"; then
+            test "$(git rev-list -n 1 "${TAG_NAME}")" = "${RELEASE_COMMIT}" || {
+              echo "Error: existing tag points to another commit." >&2
+              exit 1
+            }
+          fi
+
+          if RELEASE_JSON="$(gh api "repos/${REPOSITORY}/releases/tags/${TAG_NAME}" 2>/dev/null)"; then
+            test "$(jq -r '.draft' <<<"${RELEASE_JSON}")" = "true" || {
+              echo "Error: ${TAG_NAME} is already published." >&2
+              exit 1
+            }
+          fi
+
+      - name: Create tag when absent
+        env:
+          TAG_NAME: ${{ needs.validate-release.outputs.tag_name }}
+          VERSION: ${{ needs.validate-release.outputs.project_version }}
+          RELEASE_COMMIT: ${{ needs.validate-release.outputs.release_commit }}
+        run: |
+          set -euo pipefail
+          if ! git show-ref --verify --quiet "refs/tags/${TAG_NAME}"; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "${TAG_NAME}" "${RELEASE_COMMIT}" -m "v2link-client v${VERSION}"
+            git push origin "${TAG_NAME}"
+          fi
+
+      - name: Create or resume draft release and upload exact assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.validate-release.outputs.project_version }}
+          TAG_NAME: ${{ needs.validate-release.outputs.tag_name }}
+          RELEASE_NOTES: ${{ needs.validate-release.outputs.release_notes }}
+          RELEASE_COMMIT: ${{ needs.validate-release.outputs.release_commit }}
+          CHANNEL: ${{ needs.validate-release.outputs.release_channel }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+            args=(
+              "${TAG_NAME}"
+              --draft
+              --verify-tag
+              --target "${RELEASE_COMMIT}"
+              --title "v2link-client v${VERSION}"
+              --notes-file "${RELEASE_NOTES}"
+            )
+            if [[ "${CHANNEL}" == "prerelease" ]]; then
+              args+=(--prerelease)
+            fi
+            gh release create "${args[@]}"
+          fi
+
+          gh release upload "${TAG_NAME}" \
+            "dist/v2link-client-${VERSION}-linux-x86_64.AppImage" \
+            "dist/v2link-client_${VERSION}_amd64.deb" \
+            "dist/SHA256SUMS" \
+            --clobber
+
+  publish-apt-repository:
+    runs-on: ubuntu-22.04
+    needs:
+      - validate-release
+      - create-draft-release
+    if: ${{ !inputs.dry_run && inputs.publish_apt }}
     timeout-minutes: 30
     permissions:
       contents: write
-
     steps:
-      - name: Checkout
+      - name: Checkout validated commit
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-release.outputs.release_commit }}
 
-      - name: Download release artifacts
+      - name: Download verified workflow artifact
         uses: actions/download-artifact@v4
         with:
-          name: v2link-client-linux
+          name: v2link-client-${{ needs.validate-release.outputs.project_version }}-linux-release
           path: dist
 
-      - name: Verify .deb artifact exists
+      - name: Verify exact Debian artifact
+        env:
+          VERSION: ${{ needs.validate-release.outputs.project_version }}
         run: |
-          if ! find dist -maxdepth 3 -type f -name "*.deb" | grep -q .; then
-            echo "Error: .deb artifact not found after download." >&2
-            exit 1
-          fi
+          cd dist
+          sha256sum -c SHA256SUMS
+          test -f "v2link-client_${VERSION}_amd64.deb"
+          test "$(find . -maxdepth 1 -type f -name '*.deb' | wc -l)" -eq 1
 
-      - name: Install APT repo dependencies
+      - name: Install APT repository dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y reprepro gnupg
@@ -133,17 +455,17 @@ jobs:
           passphrase: ${{ secrets.APT_GPG_PASSPHRASE }}
 
       - name: Verify signing key matches apt/public.key
+        env:
+          SECRET_FINGERPRINT: ${{ steps.import_gpg.outputs.fingerprint }}
         run: |
           repo_fingerprint="$(gpg --show-keys --with-colons apt/public.key | awk -F: '$1=="fpr"{print toupper($10); exit}')"
-          secret_fingerprint="$(echo "${{ steps.import_gpg.outputs.fingerprint }}" | tr '[:lower:]' '[:upper:]')"
-          if [[ -z "${repo_fingerprint}" ]]; then
-            echo "Error: could not read fingerprint from apt/public.key" >&2
+          secret_fingerprint="$(printf '%s' "${SECRET_FINGERPRINT}" | tr '[:lower:]' '[:upper:]')"
+          test -n "${repo_fingerprint}" || {
+            echo "Error: could not read fingerprint from apt/public.key." >&2
             exit 1
-          fi
+          }
           if [[ "${repo_fingerprint}" != "${secret_fingerprint}" ]]; then
-            echo "Error: apt/public.key fingerprint does not match APT_GPG_PRIVATE_KEY secret." >&2
-            echo "Public key: ${repo_fingerprint}" >&2
-            echo "Secret key: ${secret_fingerprint}" >&2
+            echo "Error: apt/public.key does not match the configured signing key." >&2
             exit 1
           fi
 
@@ -151,7 +473,11 @@ jobs:
         env:
           APT_GPG_KEY_ID: ${{ steps.import_gpg.outputs.fingerprint }}
         run: |
-          ./scripts/apt_repo_build.sh --dist-dir dist --repo-dir public/apt --codename stable --component main
+          ./scripts/apt_repo_build.sh \
+            --dist-dir dist \
+            --repo-dir public/apt \
+            --codename stable \
+            --component main
 
       - name: Publish APT repository to gh-pages
         uses: peaceiris/actions-gh-pages@v4
@@ -160,3 +486,78 @@ jobs:
           publish_branch: gh-pages
           publish_dir: ./public
           enable_jekyll: false
+
+  publish-release:
+    runs-on: ubuntu-22.04
+    needs:
+      - validate-release
+      - create-draft-release
+      - publish-apt-repository
+    if: >-
+      ${{
+        always() &&
+        !inputs.dry_run &&
+        needs.create-draft-release.result == 'success' &&
+        (
+          needs.publish-apt-repository.result == 'success' ||
+          (!inputs.publish_apt && needs.publish-apt-repository.result == 'skipped')
+        )
+      }}
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Verify and publish draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ needs.validate-release.outputs.project_version }}
+          TAG_NAME: ${{ needs.validate-release.outputs.tag_name }}
+          RELEASE_COMMIT: ${{ needs.validate-release.outputs.release_commit }}
+          CHANNEL: ${{ needs.validate-release.outputs.release_channel }}
+          PUBLISH_APT: ${{ needs.validate-release.outputs.publish_apt }}
+        run: |
+          set -euo pipefail
+          RELEASE_JSON="$(gh api "repos/${REPOSITORY}/releases/tags/${TAG_NAME}")"
+          test "$(jq -r '.draft' <<<"${RELEASE_JSON}")" = "true" || {
+            echo "Error: release is no longer a draft." >&2
+            exit 1
+          }
+
+          git ls-remote --exit-code --tags "https://github.com/${REPOSITORY}.git" "refs/tags/${TAG_NAME}^{}" >tag-ref
+          test "$(awk '{print $1}' tag-ref)" = "${RELEASE_COMMIT}" || {
+            echo "Error: release tag does not resolve to the validated commit." >&2
+            exit 1
+          }
+
+          ASSETS="$(jq -r '.assets[].name' <<<"${RELEASE_JSON}")"
+          for required in \
+            "v2link-client-${VERSION}-linux-x86_64.AppImage" \
+            "v2link-client_${VERSION}_amd64.deb" \
+            "SHA256SUMS"; do
+            grep -Fxq "${required}" <<<"${ASSETS}" || {
+              echo "Error: required release asset is missing: ${required}" >&2
+              exit 1
+            }
+          done
+
+          PRERELEASE=false
+          if [[ "${CHANNEL}" == "prerelease" ]]; then
+            PRERELEASE=true
+          fi
+          RELEASE_ID="$(jq -r '.id' <<<"${RELEASE_JSON}")"
+          gh api --method PATCH "repos/${REPOSITORY}/releases/${RELEASE_ID}" \
+            -F draft=false \
+            -F prerelease="${PRERELEASE}" >/dev/null
+
+          {
+            echo "## Release published"
+            echo
+            echo "- Version: ${VERSION}"
+            echo "- Tag: ${TAG_NAME}"
+            echo "- Commit: \`${RELEASE_COMMIT}\`"
+            echo "- Channel: ${CHANNEL}"
+            echo "- GitHub Release: published"
+            echo "- APT repository: $([[ "${PUBLISH_APT}" == "true" ]] && echo published || echo intentionally skipped)"
+            echo "- Checksums: verified before draft creation"
+          } >>"${GITHUB_STEP_SUMMARY}"

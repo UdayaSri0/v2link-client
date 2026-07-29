@@ -199,24 +199,12 @@ Artifacts are written to `dist/`:
 
 ## Release Process (Maintainers)
 
-Canonical version source: `pyproject.toml` (`[project].version`).
+The manually triggered GitHub Actions release workflow validates the version and
+curated notes, tests the project, fetches checksum-pinned Xray-core, builds and
+verifies the AppImage and Debian package, and supports a non-publishing dry run.
 
-1. Update `pyproject.toml` version.
-2. Update `CHANGELOG.md`.
-3. Commit changes.
-4. Create and push matching tag:
-
-```bash
-git tag v<version>
-git push origin v<version>
-```
-
-5. GitHub Actions workflow `.github/workflows/release.yml` will:
-
-- verify `tag version == pyproject version`
-- build AppImage + `.deb` + `SHA256SUMS`
-- upload artifacts to GitHub Release
-- publish/update signed APT repo to `gh-pages`
+See the [maintainer release process](docs/maintainer-release.md) for preparation,
+dry-run, publication, APT signing, and safe recovery instructions.
 
 ## APT Signing Key Setup (Maintainers)
 
