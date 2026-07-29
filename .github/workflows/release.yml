@@ -6,11 +6,14 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-linux:
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -60,6 +63,14 @@ jobs:
           fi
           echo "RELEASE_NOTES=${RELEASE_NOTES}" >> "${GITHUB_ENV}"
 
+      - name: Run unit tests
+        run: python -m pytest -v
+
+      - name: Fetch and verify pinned Xray-core
+        run: |
+          ARCH=x86_64 ./scripts/fetch_xray_core.sh
+          ARCH=x86_64 ./scripts/fetch_xray_core.sh --verify-existing
+
       - name: Build release artifacts
         run: |
           VERSION="${PROJECT_VERSION}" ./scripts/build_release.sh
@@ -88,6 +99,9 @@ jobs:
   publish-apt-repo:
     runs-on: ubuntu-22.04
     needs: build-linux
+    timeout-minutes: 30
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout

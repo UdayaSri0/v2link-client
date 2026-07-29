@@ -10,16 +10,24 @@ def test_project_version_is_release_target() -> None:
     import tomllib
 
     data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    assert data["project"]["version"] == "0.2.1"
+    assert data["project"]["version"] == "0.2.2"
 
 
 def test_fetch_xray_script_pins_official_release_and_sha() -> None:
+    import json
+
     script = (ROOT / "scripts" / "fetch_xray_core.sh").read_text(encoding="utf-8")
+    manifest = json.loads(
+        (ROOT / "packaging" / "xray-release.json").read_text(encoding="utf-8")
+    )
     assert "https://github.com/XTLS/Xray-core/releases/download" in script
-    assert "XRAY_VERSION=\"v26.3.27\"" in script
-    assert "XRAY_SHA256_X86_64=\"23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae\"" in script
-    assert "XRAY_SHA256_AARCH64=\"4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c\"" in script
+    assert manifest["version"] == "v26.3.27"
+    assert len(manifest["assets"]["x86_64"]["sha256"]) == 64
+    assert len(manifest["assets"]["aarch64"]["sha256"]) == 64
     assert "sha256sum -c -" in script
+    assert "--verify-existing" in script
+    assert "--retry-all-errors" in script
+    assert "verify_directory" in script
 
 
 def test_build_scripts_contain_xray_copy_checks() -> None:
@@ -41,6 +49,7 @@ def test_build_scripts_contain_xray_copy_checks() -> None:
     assert "build_netmon.sh" in release
     assert "AppImage layout missing bundled Xray" in release
     assert ".deb layout missing bundled Xray" in release
+    assert "verify_release_artifacts.sh" in release
 
 
 def test_runtime_diagnostic_script_is_private_and_read_only() -> None:
@@ -62,3 +71,19 @@ def test_build_scripts_use_release_artifact_naming() -> None:
     assert '${APP_NAME}-${VERSION_NAME}-linux-${ARCH_NAME}.AppImage' in appimage
     assert '${APP_NAME}_${VERSION_NAME}_${ARCH_NAME}.deb' in deb
     assert "sha256sum ./*.AppImage ./*.deb > SHA256SUMS" in release
+
+
+def test_appimagetool_is_versioned_and_checksum_verified() -> None:
+    script = (ROOT / "scripts" / "build_appimage.sh").read_text(encoding="utf-8")
+    assert "releases/download/continuous" not in script
+    assert "APPIMAGETOOL_VERSION=" in script
+    assert "APPIMAGETOOL_SHA256_X86_64=" in script
+    assert "sha256sum -c -" in script
+
+
+def test_release_verifier_inspects_extracted_artifacts() -> None:
+    script = (ROOT / "scripts" / "verify_release_artifacts.sh").read_text(encoding="utf-8")
+    assert "--appimage-extract" in script
+    assert "dpkg-deb -x" in script
+    assert "run -test" in script
+    assert "THIRD_PARTY_NOTICES.md" in script

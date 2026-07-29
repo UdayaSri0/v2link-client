@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
 from pathlib import Path
 import platform
@@ -10,7 +10,7 @@ import subprocess
 import sys
 from typing import Iterable, Literal
 
-from v2link_client.core.system_subprocess import build_host_subprocess_env, system_which
+from v2link_client.core.system_subprocess import build_xray_subprocess_env, system_which
 from v2link_client.core.xray_settings import load_xray_settings
 
 XraySource = Literal["user-configured", "bundled", "system-path"]
@@ -27,6 +27,13 @@ class XrayBinary:
     version: str | None
     valid: bool
     error: str | None = None
+    architecture: str | None = None
+    geoip_found: bool = False
+    geosite_found: bool = False
+    asset_dir: str | None = None
+    version_manifest: str | None = None
+    version_manifest_status: str = "unavailable"
+    warning: str | None = None
 
     @property
     def name(self) -> str:
@@ -124,13 +131,7 @@ def get_bundled_xray_candidates() -> list[Path]:
         )
 
     for base in (cwd, root):
-        candidates.extend(
-            [
-                base / "vendor" / "xray" / arch / "xray",
-                base / "vendor" / "xray" / "x86_64" / "xray",
-                base / "vendor" / "xray" / "aarch64" / "xray",
-            ]
-        )
+        candidates.append(base / "vendor" / "xray" / arch / "xray")
 
     return _dedupe(candidates)
 
@@ -167,7 +168,16 @@ def validate_xray_binary(
     if not os.access(candidate, os.X_OK):
         return XrayBinary(display_path, source, None, False, "Xray binary is not executable.")
 
-    env, _info = build_host_subprocess_env()
+    base = candidate.parent
+    geoip_found = (base / "geoip.dat").is_file()
+    geosite_found = (base / "geosite.dat").is_file()
+    manifest_path = base / "VERSION"
+    manifest_version = (
+        manifest_path.read_text(encoding="utf-8").strip()
+        if manifest_path.is_file()
+        else None
+    )
+    env, _info = build_xray_subprocess_env(candidate)
     try:
         result = subprocess.run(
             [str(candidate), "version"],
@@ -180,7 +190,8 @@ def validate_xray_binary(
     except subprocess.TimeoutExpired:
         return XrayBinary(display_path, source, None, False, "Timed out while checking Xray version.")
     except OSError as exc:
-        return XrayBinary(display_path, source, None, False, f"Could not run Xray: {exc}")
+        detail = "Xray executable has the wrong architecture." if getattr(exc, "errno", None) == 8 else f"Could not run Xray: {exc}"
+        return XrayBinary(display_path, source, None, False, detail)
 
     output = "\n".join(part for part in (result.stdout, result.stderr) if part)
     version = _parse_version(output)
@@ -191,7 +202,22 @@ def validate_xray_binary(
         detail = output.strip() or "no version output"
         return XrayBinary(display_path, source, None, False, f"Selected file does not look like Xray-core: {detail}")
 
-    return XrayBinary(str(candidate.resolve(strict=False)), source, version, True, None)
+    manifest_status = "unavailable"
+    if manifest_version:
+        manifest_status = "match" if manifest_version == version else "mismatch"
+    if manifest_status == "mismatch":
+        return XrayBinary(
+            display_path, source, version, False,
+            f"Xray version {version} does not match VERSION record {manifest_version}.",
+            _normalize_arch(), geoip_found, geosite_found, str(base),
+            manifest_version, manifest_status,
+        )
+
+    return XrayBinary(
+        str(candidate.resolve(strict=False)), source, version, True, None,
+        _normalize_arch(), geoip_found, geosite_found, str(base),
+        manifest_version, manifest_status,
+    )
 
 
 def get_system_xray_candidate() -> XrayBinary:
@@ -214,12 +240,22 @@ def find_xray_binary() -> XrayBinary:
     for candidate in get_bundled_xray_candidates():
         bundled = validate_xray_binary(candidate, source="bundled")
         if bundled.valid:
+            if errors:
+                return replace(
+                    bundled,
+                    warning="The custom Xray path is invalid. v2link-client is using the bundled Xray-core instead.",
+                )
             return bundled
         if candidate.exists():
             errors.append(f"bundled {candidate}: {bundled.error or 'invalid'}")
 
     system = get_system_xray_candidate()
     if system.valid:
+        if errors:
+            return replace(
+                system,
+                warning="The custom Xray path is invalid. v2link-client is using Xray-core from the system PATH instead.",
+            )
         return system
     errors.append(f"system PATH: {system.error or 'missing'}")
 
@@ -235,6 +271,9 @@ def xray_asset_status(binary: XrayBinary | None) -> dict[str, object]:
             "geosite_path": None,
             "geosite_found": False,
             "bundled_incomplete": False,
+            "asset_dir": None,
+            "version_manifest": None,
+            "version_manifest_status": "unavailable",
         }
     base = Path(binary.path).parent
     geoip = base / "geoip.dat"
@@ -245,4 +284,7 @@ def xray_asset_status(binary: XrayBinary | None) -> dict[str, object]:
         "geosite_path": str(geosite),
         "geosite_found": geosite.is_file(),
         "bundled_incomplete": binary.source == "bundled" and not (geoip.is_file() and geosite.is_file()),
+        "asset_dir": str(base),
+        "version_manifest": binary.version_manifest,
+        "version_manifest_status": binary.version_manifest_status,
     }
