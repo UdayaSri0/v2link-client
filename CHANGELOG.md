@@ -10,6 +10,14 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+## [0.2.3] - 2026-07-29
+
+### Changed
+- Prepared a corrective release from the current default branch using the guarded manual release workflow.
+
+### Fixed
+- Advanced the canonical application and package version so corrected artifacts can be built and verified without reusing or moving the existing v0.2.2 tag.
+
 ## [0.2.2] - 2026-07-29
 
 ### Added
