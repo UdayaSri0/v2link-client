@@ -88,6 +88,7 @@ sanitize_deb_version() {
   local version="$1"
   version="${version#v}"
   version="${version//_/+}"
+  # shellcheck disable=SC2001 # sed applies a character-class replacement.
   version="$(echo "${version}" | sed 's/[^0-9A-Za-z.+:~-]/+/g')"
   version="$(echo "${version}" | sed 's/^+*//; s/+*$//')"
   if [[ -z "${version}" ]]; then

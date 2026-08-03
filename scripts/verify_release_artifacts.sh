@@ -50,7 +50,9 @@ for item in xray geoip.dat geosite.dat LICENSE VERSION; do
   require_file "${APP_ASSETS}/${item}"
 done
 [[ -x "${APP_XRAY}" ]] || fail "AppImage Xray is not executable"
+# shellcheck disable=SC2016 # These assertions intentionally match literal launcher variables.
 grep -Fq 'V2LINK_BUNDLED_XRAY_DIR="${APPDIR}/usr/bin/xray"' "${APP_EXTRACT}/squashfs-root/AppRun"
+# shellcheck disable=SC2016 # These assertions intentionally match literal launcher variables.
 grep -Fq 'XRAY_LOCATION_ASSET="${APPDIR}/usr/bin/xray"' "${APP_EXTRACT}/squashfs-root/AppRun"
 APP_VERSION_OUTPUT="$(XRAY_LOCATION_ASSET="${APP_ASSETS}" "${APP_XRAY}" version)"
 [[ "${APP_VERSION_OUTPUT}" == *"Xray ${XRAY_VERSION#v}"* ]] || fail "AppImage Xray version mismatch"
