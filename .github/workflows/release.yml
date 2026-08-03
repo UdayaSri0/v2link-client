@@ -156,7 +156,19 @@ jobs:
           fi
 
           RELEASE_STATE="missing"
-          if RELEASE_JSON="$(gh api "repos/${REPOSITORY}/releases/tags/${TAG_NAME}" 2>/dev/null)"; then
+          # The release-by-tag endpoint excludes drafts. List authenticated
+          # releases so validation can safely detect resumable drafts.
+          mapfile -t RELEASE_IDS < <(
+            gh api --paginate "repos/${REPOSITORY}/releases?per_page=100" \
+              --jq ".[] | select(.tag_name == \"${TAG_NAME}\") | .id"
+          )
+          RELEASE_COUNT="${#RELEASE_IDS[@]}"
+          if [[ "${RELEASE_COUNT}" -gt 1 ]]; then
+            echo "Error: multiple releases use tag ${TAG_NAME}; refusing ambiguous recovery." >&2
+            exit 1
+          fi
+          if [[ "${RELEASE_COUNT}" -eq 1 ]]; then
+            RELEASE_JSON="$(gh api "repos/${REPOSITORY}/releases/${RELEASE_IDS[0]}")"
             IS_DRAFT="$(jq -r '.draft' <<<"${RELEASE_JSON}")"
             TARGET_COMMITISH="$(jq -r '.target_commitish // empty' <<<"${RELEASE_JSON}")"
             if [[ "${IS_DRAFT}" != "true" ]]; then
@@ -327,6 +339,9 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
+    outputs:
+      # Downstream publication reads drafts by immutable ID, never by tag.
+      release_id: ${{ steps.prepare_release.outputs.release_id }}
     steps:
       - name: Checkout validated commit
         uses: actions/checkout@v4
@@ -363,7 +378,17 @@ jobs:
             }
           fi
 
-          if RELEASE_JSON="$(gh api "repos/${REPOSITORY}/releases/tags/${TAG_NAME}" 2>/dev/null)"; then
+          mapfile -t RELEASE_IDS < <(
+            gh api --paginate "repos/${REPOSITORY}/releases?per_page=100" \
+              --jq ".[] | select(.tag_name == \"${TAG_NAME}\") | .id"
+          )
+          RELEASE_COUNT="${#RELEASE_IDS[@]}"
+          if [[ "${RELEASE_COUNT}" -gt 1 ]]; then
+            echo "Error: multiple releases use tag ${TAG_NAME}; refusing ambiguous recovery." >&2
+            exit 1
+          fi
+          if [[ "${RELEASE_COUNT}" -eq 1 ]]; then
+            RELEASE_JSON="$(gh api "repos/${REPOSITORY}/releases/${RELEASE_IDS[0]}")"
             test "$(jq -r '.draft' <<<"${RELEASE_JSON}")" = "true" || {
               echo "Error: ${TAG_NAME} is already published." >&2
               exit 1
@@ -385,6 +410,7 @@ jobs:
           fi
 
       - name: Create or resume draft release and upload exact assets
+        id: prepare_release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.validate-release.outputs.project_version }}
@@ -394,7 +420,16 @@ jobs:
           CHANNEL: ${{ needs.validate-release.outputs.release_channel }}
         run: |
           set -euo pipefail
-          if ! gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+          mapfile -t RELEASE_IDS < <(
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq ".[] | select(.tag_name == \"${TAG_NAME}\") | .id"
+          )
+          RELEASE_COUNT="${#RELEASE_IDS[@]}"
+          if [[ "${RELEASE_COUNT}" -gt 1 ]]; then
+            echo "Error: multiple releases use tag ${TAG_NAME}; refusing ambiguous recovery." >&2
+            exit 1
+          fi
+          if [[ "${RELEASE_COUNT}" -eq 0 ]]; then
             args=(
               "${TAG_NAME}"
               --draft
@@ -407,6 +442,16 @@ jobs:
               args+=(--prerelease)
             fi
             gh release create "${args[@]}"
+          else
+            RELEASE_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_IDS[0]}")"
+            test "$(jq -r '.draft' <<<"${RELEASE_JSON}")" = "true" || {
+              echo "Error: ${TAG_NAME} already identifies a published release." >&2
+              exit 1
+            }
+            test "$(jq -r '.target_commitish' <<<"${RELEASE_JSON}")" = "${RELEASE_COMMIT}" || {
+              echo "Error: existing draft targets a different commit." >&2
+              exit 1
+            }
           fi
 
           gh release upload "${TAG_NAME}" \
@@ -414,6 +459,26 @@ jobs:
             "dist/v2link-client_${VERSION}_amd64.deb" \
             "dist/SHA256SUMS" \
             --clobber
+
+          mapfile -t RELEASE_IDS < <(
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq ".[] | select(.tag_name == \"${TAG_NAME}\") | .id"
+          )
+          test "${#RELEASE_IDS[@]}" -eq 1 || {
+            echo "Error: could not uniquely identify the prepared draft release." >&2
+            exit 1
+          }
+          RELEASE_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_IDS[0]}")"
+          test "$(jq -r '.draft' <<<"${RELEASE_JSON}")" = "true" || {
+            echo "Error: prepared release is not a draft." >&2
+            exit 1
+          }
+          RELEASE_ID="$(jq -r '.id' <<<"${RELEASE_JSON}")"
+          [[ "${RELEASE_ID}" =~ ^[0-9]+$ ]] || {
+            echo "Error: prepared draft returned an invalid release ID." >&2
+            exit 1
+          }
+          echo "release_id=${RELEASE_ID}" >>"${GITHUB_OUTPUT}"
 
   publish-apt-repository:
     runs-on: ubuntu-22.04
@@ -519,11 +584,40 @@ jobs:
           RELEASE_COMMIT: ${{ needs.validate-release.outputs.release_commit }}
           CHANNEL: ${{ needs.validate-release.outputs.release_channel }}
           PUBLISH_APT: ${{ needs.validate-release.outputs.publish_apt }}
+          RELEASE_ID: ${{ needs.create-draft-release.outputs.release_id }}
         run: |
           set -euo pipefail
-          RELEASE_JSON="$(gh api "repos/${REPOSITORY}/releases/tags/${TAG_NAME}")"
-          test "$(jq -r '.draft' <<<"${RELEASE_JSON}")" = "true" || {
-            echo "Error: release is no longer a draft." >&2
+          [[ "${RELEASE_ID}" =~ ^[0-9]+$ ]] || {
+            echo "Error: draft creation did not return a valid release ID." >&2
+            exit 1
+          }
+          # GET /releases/{id} includes drafts; GET /releases/tags/{tag}
+          # intentionally does not and must not be used for this step.
+          RELEASE_JSON="$(gh api "repos/${REPOSITORY}/releases/${RELEASE_ID}")"
+
+          test "$(jq -r '.id' <<<"${RELEASE_JSON}")" = "${RELEASE_ID}" || {
+            echo "Error: fetched release ID does not match the prepared draft." >&2
+            exit 1
+          }
+          test "$(jq -r '.tag_name' <<<"${RELEASE_JSON}")" = "${TAG_NAME}" || {
+            echo "Error: draft tag does not match ${TAG_NAME}." >&2
+            exit 1
+          }
+          test "$(jq -r '.name' <<<"${RELEASE_JSON}")" = "v2link-client v${VERSION}" || {
+            echo "Error: draft title does not match version ${VERSION}." >&2
+            exit 1
+          }
+          test "$(jq -r '.target_commitish' <<<"${RELEASE_JSON}")" = "${RELEASE_COMMIT}" || {
+            echo "Error: draft does not target the validated commit." >&2
+            exit 1
+          }
+
+          EXPECTED_PRERELEASE=false
+          if [[ "${CHANNEL}" == "prerelease" ]]; then
+            EXPECTED_PRERELEASE=true
+          fi
+          test "$(jq -r '.prerelease' <<<"${RELEASE_JSON}")" = "${EXPECTED_PRERELEASE}" || {
+            echo "Error: draft prerelease state does not match channel ${CHANNEL}." >&2
             exit 1
           }
 
@@ -533,6 +627,10 @@ jobs:
             exit 1
           }
 
+          test "$(jq '.assets | length' <<<"${RELEASE_JSON}")" -eq 3 || {
+            echo "Error: draft must contain exactly the three required assets." >&2
+            exit 1
+          }
           ASSETS="$(jq -r '.assets[].name' <<<"${RELEASE_JSON}")"
           for required in \
             "v2link-client-${VERSION}-linux-x86_64.AppImage" \
@@ -544,14 +642,47 @@ jobs:
             }
           done
 
-          PRERELEASE=false
-          if [[ "${CHANNEL}" == "prerelease" ]]; then
-            PRERELEASE=true
+          VERIFY_DIR="$(mktemp -d)"
+          trap 'rm -rf "${VERIFY_DIR}"' EXIT
+          while IFS=$'\t' read -r asset_id asset_name asset_state asset_size; do
+            [[ "${asset_id}" =~ ^[0-9]+$ ]] || {
+              echo "Error: release asset ${asset_name} has an invalid ID." >&2
+              exit 1
+            }
+            test "${asset_state}" = "uploaded" || {
+              echo "Error: release asset ${asset_name} is not fully uploaded." >&2
+              exit 1
+            }
+            [[ "${asset_size}" =~ ^[1-9][0-9]*$ ]] || {
+              echo "Error: release asset ${asset_name} is empty." >&2
+              exit 1
+            }
+            gh api "repos/${REPOSITORY}/releases/assets/${asset_id}" \
+              -H "Accept: application/octet-stream" >"${VERIFY_DIR}/${asset_name}"
+          done < <(jq -r '.assets[] | [.id, .name, .state, .size] | @tsv' <<<"${RELEASE_JSON}")
+
+          cd "${VERIFY_DIR}"
+          CHECKSUM_NAMES="$(awk '{name=$2; sub(/^\.\//, "", name); print name}' SHA256SUMS | sort)"
+          EXPECTED_CHECKSUM_NAMES="$(printf '%s\n' \
+            "v2link-client-${VERSION}-linux-x86_64.AppImage" \
+            "v2link-client_${VERSION}_amd64.deb" | sort)"
+          test "${CHECKSUM_NAMES}" = "${EXPECTED_CHECKSUM_NAMES}" || {
+            echo "Error: SHA256SUMS does not contain exactly the required binaries." >&2
+            exit 1
+          }
+          sha256sum -c SHA256SUMS
+
+          IS_DRAFT="$(jq -r '.draft' <<<"${RELEASE_JSON}")"
+          if [[ "${IS_DRAFT}" == "false" ]]; then
+            echo "Release ${TAG_NAME} is already public and passed all validation; no update is needed."
+          elif [[ "${IS_DRAFT}" == "true" ]]; then
+            gh api --method PATCH "repos/${REPOSITORY}/releases/${RELEASE_ID}" \
+              -F draft=false \
+              -F prerelease="${EXPECTED_PRERELEASE}" >/dev/null
+          else
+            echo "Error: release draft state is invalid: ${IS_DRAFT}." >&2
+            exit 1
           fi
-          RELEASE_ID="$(jq -r '.id' <<<"${RELEASE_JSON}")"
-          gh api --method PATCH "repos/${REPOSITORY}/releases/${RELEASE_ID}" \
-            -F draft=false \
-            -F prerelease="${PRERELEASE}" >/dev/null
 
           {
             echo "## Release published"
