@@ -38,9 +38,58 @@ def test_build_xray_config_for_vless_tls(tmp_path) -> None:
     assert stream["network"] == "tcp"
     assert stream["security"] == "tls"
     assert stream["tlsSettings"]["serverName"] == "aka.ms"
-    assert stream["tlsSettings"]["allowInsecure"] is False
+    assert "allowInsecure" not in stream["tlsSettings"]
     assert stream["tlsSettings"]["fingerprint"] == "chrome"
     assert stream["tlsSettings"]["verifyPeerCertByName"] == "aka.ms,prime.example.com"
+
+
+def _contains_key(value, key: str) -> bool:
+    if isinstance(value, dict):
+        return key in value or any(_contains_key(item, key) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_key(item, key) for item in value)
+    return False
+
+
+@pytest.mark.parametrize("legacy", ["0", "false", "1", "true"])
+def test_legacy_allow_insecure_is_never_generated(tmp_path, legacy: str) -> None:
+    parsed = parse_link(
+        "vless://11111111-1111-1111-1111-111111111111@example.invalid:443"
+        f"?security=tls&type=tcp&allowInsecure={legacy}"
+    )
+    cfg = build_xray_config(parsed, logs_dir=tmp_path)
+    assert not _contains_key(cfg, "allowInsecure")
+
+
+def test_explicit_modern_tls_fields_take_precedence(tmp_path) -> None:
+    pin_a = "ab" * 32
+    pin_b = "cd" * 32
+    parsed = parse_link(
+        "vless://11111111-1111-1111-1111-111111111111@example.invalid:443"
+        "?security=tls&type=tcp&sni=sni.example.invalid"
+        f"&pcs={pin_a},{pin_b}&vcn=verify.example.invalid,backup.example.invalid"
+    )
+    first = build_xray_config(parsed, logs_dir=tmp_path)
+    second = build_xray_config(parsed, logs_dir=tmp_path)
+    tls = first["outbounds"][0]["streamSettings"]["tlsSettings"]
+
+    assert tls["serverName"] == "sni.example.invalid"
+    assert tls["pinnedPeerCertSha256"] == f"{pin_a},{pin_b}"
+    assert tls["verifyPeerCertByName"] == "verify.example.invalid,backup.example.invalid"
+    assert first == second
+
+
+def test_tls_without_sni_uses_host_without_empty_modern_fields(tmp_path) -> None:
+    parsed = parse_link(
+        "vless://11111111-1111-1111-1111-111111111111@example.invalid:443"
+        "?security=tls&type=tcp&fp=chrome&alpn=h2,http%2F1.1"
+    )
+    tls = build_xray_config(parsed, logs_dir=tmp_path)["outbounds"][0]["streamSettings"]["tlsSettings"]
+    assert tls["serverName"] == "example.invalid"
+    assert tls["fingerprint"] == "chrome"
+    assert tls["alpn"] == ["h2", "http/1.1"]
+    assert "pinnedPeerCertSha256" not in tls
+    assert "verifyPeerCertByName" not in tls
 
 
 def test_detailed_xray_logging_is_opt_in_and_keeps_access_disabled(tmp_path) -> None:

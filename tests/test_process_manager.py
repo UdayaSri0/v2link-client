@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from v2link_client.core.errors import PortInUseError
+from v2link_client.core.errors import ConfigBuildError, PortInUseError
 from v2link_client.core.process_manager import (
     XrayProcessManager,
     _append_bounded,
@@ -50,6 +50,23 @@ def test_validate_xray_config_smoke(tmp_path) -> None:
 
     xray = find_xray_binary()
     validate_xray_config(xray, cfg_path)
+
+
+def test_validate_xray_config_sanitizes_subprocess_error(tmp_path) -> None:
+    synthetic_secret = "synthetic-password"
+    script = _script(
+        tmp_path / "xray-error",
+        "printf '%s\\n' 'transport/internet: password=synthetic-password invalid pinnedPeerCertSha256' >&2\nexit 23",
+    )
+    xray = XrayBinary(str(script), "user-configured", "test", True, None)
+
+    with pytest.raises(ConfigBuildError) as raised:
+        validate_xray_config(xray, tmp_path / "config.json")
+
+    assert synthetic_secret not in str(raised.value)
+    assert synthetic_secret not in raised.value.user_message
+    assert "pinnedPeerCertSha256" in raised.value.user_message
+    assert "<redacted>" in raised.value.user_message
 
 
 def _script(path: Path, body: str) -> Path:
