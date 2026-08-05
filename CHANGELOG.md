@@ -8,7 +8,11 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- Migrated legacy VLESS `allowInsecure` imports to normal secure certificate verification with a compatibility warning, and added strict support for provider-supplied `pcs` certificate pins and `vcn` verification names.
+
 ### Fixed
+
+- Stopped generating the Xray-core 26.3.27-removed `allowInsecure` field, invalidated stale saved-profile validation when the config schema or selected Xray identity changes, and sanitized Xray validation errors before displaying them.
 
 ## [0.2.3] - 2026-07-29
 

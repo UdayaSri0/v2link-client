@@ -311,7 +311,7 @@ Currently implemented:
 - `vless://`
 - `security=tls` and `security=none`
 - transport: `tcp`, `ws`, `grpc`
-- optional: `sni`, `fp`, `alpn`, `allowInsecure`, `flow`
+- optional: `sni`, `fp`, `alpn`, `pcs`, `vcn`, `flow`
 - limited `headerType=http` handling for TCP
 
 Not yet implemented:
@@ -337,13 +337,23 @@ Unset XDG variables use the normal Linux defaults under `~/.config`, `~/.local/s
 Common causes:
 
 - Invalid endpoint or blocked server
-- Mismatched `sni` and certificate with strict TLS verification (`allowInsecure=0`)
+- Mismatched `sni`/verification name and the server certificate
+- A legacy profile that depended on the removed `allowInsecure` certificate bypass
 
 Actions:
 
-- verify link/server settings
-- try `sni` aligned with target host
+- verify link/server settings without pasting the complete profile URL into reports
+- obtain a current profile from the service provider when the legacy profile no longer verifies
+- use provider-supplied `pcs` certificate SHA-256 pins and/or `vcn` certificate verification names when required
 - inspect logs via **Open logs folder**
+
+Xray-core 26.3.27 no longer accepts the legacy `allowInsecure` bypass. v2link-client
+never emits that option. Legacy false values remain harmless, while legacy true
+values are migrated to normal secure certificate verification and produce a
+compatibility warning. If verification then fails, obtain an updated profile
+from the service provider. The application never invents a certificate pin or
+retrieves one from a remote server. Imported `pcs` values must be valid SHA-256
+certificate fingerprints; `vcn` values select certificate verification names.
 
 ### Qt xcb plugin error (`libxcb-cursor.so.0`)
 
