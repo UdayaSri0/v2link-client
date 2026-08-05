@@ -152,6 +152,12 @@ for required_file in xray geoip.dat geosite.dat LICENSE VERSION; do
   fi
 done
 
+# AppImages remain unprivileged. A netmon helper must be installed separately.
+if find "${APPDIR}" \( -name 'v2link-netmon' -o -name 'v2link-netmon.service' \) -print -quit | grep -q .; then
+  echo "Error: AppDir must not contain privileged v2link-netmon service assets." >&2
+  exit 1
+fi
+
 rm -f "${OUTPUT_FILE}"
 echo "Building AppImage with ${APPIMAGE_TOOL_BIN}..."
 ARCH="${ARCH_NAME}" VERSION="${VERSION_NAME}" APPIMAGE_EXTRACT_AND_RUN=1 \

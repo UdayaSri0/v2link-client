@@ -250,14 +250,29 @@ jobs:
       - name: Run unit tests
         run: python -m pytest -v
 
+      - name: Run focused netmon Python tests
+        run: |
+          python -m pytest -v \
+            tests/test_netmon_client.py \
+            tests/test_diagnostics.py \
+            tests/test_build_scripts.py
+
+      - name: Run netmon Rust quality checks
+        run: |
+          cargo fmt --manifest-path netmon/Cargo.toml --all -- --check
+          cargo test --manifest-path netmon/Cargo.toml --workspace --locked
+          cargo clippy --manifest-path netmon/Cargo.toml --workspace --all-targets --locked -- -D warnings
+
       - name: Validate packaging shell scripts
         run: |
           bash -n scripts/*.sh
           bash -n packaging/deb/postinst
+          bash -n packaging/deb/prerm
           bash -n packaging/deb/postrm
           bash -n packaging/deb/v2link-client-wrapper.in
           shellcheck scripts/*.sh \
             packaging/deb/postinst \
+            packaging/deb/prerm \
             packaging/deb/postrm \
             packaging/deb/v2link-client-wrapper.in
 

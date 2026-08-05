@@ -65,6 +65,11 @@ if [[ ! -f "${ROOT_DIR}/build/AppDir/usr/bin/xray/geoip.dat" || ! -f "${ROOT_DIR
   echo "Error: AppImage layout missing bundled Xray geo assets." >&2
   exit 1
 fi
+if find "${ROOT_DIR}/build/AppDir" \
+  \( -name 'v2link-netmon' -o -name 'v2link-netmon.service' \) -print -quit | grep -q .; then
+  echo "Error: AppImage layout contains privileged v2link-netmon service assets." >&2
+  exit 1
+fi
 
 DEB_TREE="$(find "${ROOT_DIR}/build/deb" -maxdepth 1 -type d -name 'v2link-client_*' | sort | tail -n 1)"
 if [[ -z "${DEB_TREE}" ]]; then
@@ -83,6 +88,16 @@ if [[ ! -x "${DEB_TREE}/usr/lib/v2link-client/v2link-netmon" ]]; then
   echo "Error: .deb layout missing v2link-netmon helper." >&2
   exit 1
 fi
+for required_file in \
+  "${DEB_TREE}/lib/systemd/system/v2link-netmon.service" \
+  "${DEB_TREE}/DEBIAN/postinst" \
+  "${DEB_TREE}/DEBIAN/prerm" \
+  "${DEB_TREE}/DEBIAN/postrm"; do
+  if [[ ! -f "${required_file}" ]]; then
+    echo "Error: .deb layout missing required netmon package asset: ${required_file}" >&2
+    exit 1
+  fi
+done
 
 cd "${DIST_DIR}"
 sha256sum ./*.AppImage ./*.deb > SHA256SUMS
