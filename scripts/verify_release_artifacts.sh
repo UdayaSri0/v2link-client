@@ -118,6 +118,9 @@ DEB_DEPENDS="$(dpkg-deb -f "${DEB}" Depends)"
 [[ ", ${DEB_DEPENDS}, " == *", init-system-helpers, "* ]] || fail "Debian package lacks init-system-helpers dependency"
 file "${DEB_XRAY}" | grep -Eq 'x86-64|x86_64' || fail "Debian Xray is not x86-64"
 file "${DEB_HELPER}" | grep -Eq 'x86-64|x86_64' || fail "Debian helper is not x86-64"
+if grep -aEq '/home/[^/[:space:]]+|/root/[^[:space:]]+' "${DEB_HELPER}"; then
+  fail "Debian helper contains an absolute build-user home path"
+fi
 
 if dpkg-deb -c "${DEB}" | awk '{print $2}' | grep -Ev '^root/root$' >/dev/null; then
   fail "Debian archive contains entries not owned by root:root"

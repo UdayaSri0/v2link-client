@@ -133,6 +133,16 @@ def test_debian_build_stages_complete_netmon_lifecycle() -> None:
     assert 'chmod 0644 "${SYSTEMD_DIR}/v2link-netmon.service"' in script
 
 
+def test_netmon_build_remaps_private_build_paths() -> None:
+    build = (ROOT / "scripts" / "build_netmon.sh").read_text(encoding="utf-8")
+    verify = (ROOT / "scripts" / "verify_release_artifacts.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "--remap-path-prefix=" in build
+    assert "absolute build-user home path" in verify
+
+
 def test_debian_maintainer_scripts_preserve_opt_in_lifecycle() -> None:
     postinst = (ROOT / "packaging" / "deb" / "postinst").read_text(encoding="utf-8")
     prerm = (ROOT / "packaging" / "deb" / "prerm").read_text(encoding="utf-8")
