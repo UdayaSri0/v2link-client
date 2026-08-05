@@ -117,6 +117,7 @@ def test_release_verifier_inspects_extracted_artifacts() -> None:
     assert "root:root" in script
     assert "systemd-analyze verify" in script
     assert "SHA256SUMS lacks current artifact" in script
+    assert "(\\./)?${artifact_name}" in script
     assert "AppImage application runtime version mismatch" in script
     assert "Debian application runtime version mismatch" in script
 

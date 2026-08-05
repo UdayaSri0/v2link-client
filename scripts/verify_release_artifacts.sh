@@ -47,9 +47,9 @@ DEB="${DEBS[0]}"
 [[ "$(basename "${DEB}")" == *"_amd64.deb" ]] || fail "unexpected Debian architecture name"
 for artifact in "${APPIMAGE}" "${DEB}"; do
   artifact_name="$(basename "${artifact}")"
-  grep -Eq "^[[:xdigit:]]{64} [ *]${artifact_name}$" "${DIST_DIR}/SHA256SUMS" || \
+  grep -Eq "^[[:xdigit:]]{64} [ *](\./)?${artifact_name}$" "${DIST_DIR}/SHA256SUMS" || \
     fail "SHA256SUMS lacks current artifact: ${artifact_name}"
-  (cd "${DIST_DIR}" && grep -E "^[[:xdigit:]]{64} [ *]${artifact_name}$" SHA256SUMS | sha256sum -c -)
+  (cd "${DIST_DIR}" && grep -E "^[[:xdigit:]]{64} [ *](\./)?${artifact_name}$" SHA256SUMS | sha256sum -c -)
 done
 
 APP_EXTRACT="${TMP_DIR}/appimage"
