@@ -12,7 +12,6 @@ from PyQt6.QtCore import QObject, QRunnable, QDate, QThreadPool, Qt, QUrl, pyqtS
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QAbstractItemView,
-    QApplication,
     QCheckBox,
     QComboBox,
     QDateEdit,
@@ -41,6 +40,7 @@ from v2link_client.core.humanize import (
     format_speed,
     format_time_only,
 )
+from v2link_client.core.logging_setup import sanitize_sensitive_text
 from v2link_client.core.netmon_client import NetmonClient, NetmonStatus
 from v2link_client.core.traffic_settings import (
     TrafficSettings,
@@ -57,6 +57,7 @@ from v2link_client.core.traffic_store import (
     TrafficStore,
     TrafficUsageSummary,
 )
+from v2link_client.ui.safe_text_actions import copy_sanitized_text
 from v2link_client.ui.traffic_chart_widget import (
     MAX_SESSION_CHART_POINTS,
     TrafficBarChartWidget,
@@ -108,7 +109,7 @@ class TrafficTaskWorker(QRunnable):
         try:
             result = self.fn()
         except Exception as exc:  # pragma: no cover - defensive worker boundary
-            self.signals.error.emit(str(exc))
+            self.signals.error.emit(sanitize_sensitive_text(str(exc)))
             return
         self.signals.result.emit(result)
 
@@ -499,31 +500,35 @@ class TrafficMonitorWidget(QWidget):
             self._populate_current_session_from_samples()
             self._populate_overview_recent_sessions()
         except Exception as exc:  # pragma: no cover - defensive UI guard
-            logger.exception("Failed to refresh traffic overview")
-            self.store_error_label.setText(str(exc))
+            safe_detail = sanitize_sensitive_text(exc)
+            logger.error("Failed to refresh traffic overview: %s", safe_detail)
+            self.store_error_label.setText(safe_detail)
 
     def refresh_applications(self) -> None:
         try:
             self._refresh_netmon_status()
             self._populate_applications()
         except Exception as exc:  # pragma: no cover - defensive UI guard
-            logger.exception("Failed to refresh traffic applications")
-            self.store_error_label.setText(str(exc))
+            safe_detail = sanitize_sensitive_text(exc)
+            logger.error("Failed to refresh traffic applications: %s", safe_detail)
+            self.store_error_label.setText(safe_detail)
 
     def refresh_profiles(self) -> None:
         try:
             self._populate_profiles()
         except Exception as exc:  # pragma: no cover - defensive UI guard
-            logger.exception("Failed to refresh traffic profiles")
-            self.store_error_label.setText(str(exc))
+            safe_detail = sanitize_sensitive_text(exc)
+            logger.error("Failed to refresh traffic profiles: %s", safe_detail)
+            self.store_error_label.setText(safe_detail)
 
     def refresh_history(self) -> None:
         started_at = time.monotonic()
         try:
             self._populate_history()
         except Exception as exc:  # pragma: no cover - defensive UI guard
-            logger.exception("Failed to refresh traffic history")
-            self.store_error_label.setText(str(exc))
+            safe_detail = sanitize_sensitive_text(exc)
+            logger.error("Failed to refresh traffic history: %s", safe_detail)
+            self.store_error_label.setText(safe_detail)
         finally:
             self._last_history_refresh_ms = (time.monotonic() - started_at) * 1000.0
 
@@ -542,8 +547,9 @@ class TrafficMonitorWidget(QWidget):
             self.app_tables_label.setText("yes" if self._store.app_tables_present() else "no")
             self._populate_history_diagnostics()
         except Exception as exc:  # pragma: no cover - defensive UI guard
-            logger.exception("Failed to refresh traffic diagnostics")
-            self.store_error_label.setText(str(exc))
+            safe_detail = sanitize_sensitive_text(exc)
+            logger.error("Failed to refresh traffic diagnostics: %s", safe_detail)
+            self.store_error_label.setText(safe_detail)
 
     def _build_overview_tab(self) -> QWidget:
         tab = QWidget()
@@ -1476,10 +1482,11 @@ class TrafficMonitorWidget(QWidget):
             return
         if generation != self._history_query_generation or session_id != self._selected_history_session_id:
             return
-        if "not found" in message.lower():
+        safe_message = sanitize_sensitive_text(message)
+        if "not found" in safe_message.lower():
             self._clear_session_detail()
             return
-        self.store_error_label.setText(message)
+        self.store_error_label.setText(safe_message)
 
     def _on_session_chart_mode_changed(self) -> None:
         session_id = self._selected_history_session_id
@@ -1642,13 +1649,16 @@ class TrafficMonitorWidget(QWidget):
             f"backend_state={self._netmon_status.backend_state}\n"
             f"reason_code={self._netmon_status.reason_code}\n"
             f"backend={self._netmon_status.backend}\n"
-            f"endpoint={self._netmon_status.api_url or self._netmon_status.socket_path or 'not configured'}\n"
+            f"service_state={self._netmon_status.service_state}\n"
+            f"socket_path={self._netmon_status.socket_path}\n"
+            f"kernel_supported={self._netmon_status.kernel_supported}\n"
             f"last_response={self._netmon_status.last_response or 'none'}\n"
-            f"last_error={self._netmon_status.last_error or 'none'}"
+            f"last_error={self._netmon_status.last_error or 'none'}\n"
+            f"remediation={self._netmon_status.remediation or 'none'}"
         )
-        clipboard = QApplication.clipboard() if QApplication.instance() else None
-        if clipboard is not None:
-            clipboard.setText(text)
+        result = copy_sanitized_text(text, label="helper diagnostics")
+        if hasattr(self, "app_status_label"):
+            self.app_status_label.setText(result.message)
 
     def _db_writable(self) -> bool:
         if self._store is None:
@@ -1782,7 +1792,7 @@ class TrafficMonitorWidget(QWidget):
         if self._closing:
             return
         self._export_in_flight = False
-        self.store_error_label.setText(message)
+        self.store_error_label.setText(sanitize_sensitive_text(message))
 
     def shutdown(self) -> None:
         """Invalidate UI jobs without stopping the independent netmon service."""

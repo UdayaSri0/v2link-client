@@ -351,3 +351,39 @@ def test_large_export_task_runs_outside_gui_callback(tmp_path) -> None:
         time.sleep(0.005)
     assert widget._export_in_flight is False
     widget.close()
+
+
+def test_traffic_worker_and_error_labels_sanitize_sensitive_text(tmp_path) -> None:
+    app = _app()
+    from v2link_client.core.traffic_store import TrafficStore
+    from v2link_client.ui.traffic_monitor_widget import (
+        TrafficMonitorWidget,
+        TrafficTaskWorker,
+    )
+
+    secret = (
+        "vless://11111111-1111-1111-1111-111111111111@example.invalid"
+        "?token=SYNTH_TRAFFIC_SECRET"
+    )
+    emitted: list[str] = []
+    worker = TrafficTaskWorker(lambda: (_ for _ in ()).throw(RuntimeError(secret)))
+    worker.signals.error.connect(emitted.append)
+    worker.run()
+    app.processEvents()
+
+    assert emitted
+    assert secret not in emitted[0]
+    assert "SYNTH_TRAFFIC_SECRET" not in emitted[0]
+
+    widget = TrafficMonitorWidget(TrafficStore(tmp_path / "traffic.sqlite3"))
+    widget._history_query_generation = 4
+    widget._selected_history_session_id = "synthetic-session"
+    widget._on_session_detail_error(4, "synthetic-session", secret)
+    assert secret not in widget.store_error_label.text()
+    assert "SYNTH_TRAFFIC_SECRET" not in widget.store_error_label.text()
+
+    widget._export_in_flight = True
+    widget._on_export_error(secret)
+    assert secret not in widget.store_error_label.text()
+    assert "SYNTH_TRAFFIC_SECRET" not in widget.store_error_label.text()
+    widget.close()
