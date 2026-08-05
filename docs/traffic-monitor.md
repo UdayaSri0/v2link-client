@@ -27,6 +27,8 @@ Xray access logging is disabled by default because it grows per request and can 
 
 Cached performance diagnostics contain timings, queue depth, aggregate database counts/sizes, rendered point counts, and owned PIDs. They exclude session UUIDs, links, credentials, tokens, and private profile contents. Database counts and file sizes are refreshed only when Diagnostics is visible or manually opened—not on live ticks.
 
+The main Diagnostics panel displays the same sanitized, size-bounded report used by **Copy diagnostics report** and **Save diagnostics report**. **Copy latest error** exports only the newest active structured error. The helper card's **Copy diagnostics** action uses the same privacy boundary and includes installation, daemon, backend, operational, reason, service, socket, kernel, response/error, and remediation fields without process rows. Review any report before sharing it publicly.
+
 Per-application tracking is marked **Advanced / Optional / Requires helper service**. The optional helper is `v2link-netmon`.
 
 ## Architecture
@@ -187,4 +189,5 @@ It is not hidden, because Xray really performs the encrypted remote connection w
 - **Installed but inactive/socket missing:** opt in to the service explicitly; installation never starts it automatically.
 - **Permission denied:** join the `v2link-netmon` group and log out/in; never run the GUI as root.
 - **Backend not implemented:** expected in v0.2.4; no per-app counters are available or fabricated.
+- **Copy helper diagnostics:** the copied text labels `backend-not-implemented` as non-operational; this informational product state is not promoted to the application's latest error.
 - **AppImage:** the AppImage is not damaged. It includes bundled Xray proxy/profile stats but requires a separately installed system helper for optional app attribution.

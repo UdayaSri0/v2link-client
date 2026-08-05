@@ -6,16 +6,20 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Added sanitized Copy diagnostics, Copy latest error, profile-validation error copy, helper-diagnostics copy, and UTF-8 diagnostics save actions with responsive small-window access.
+
 ### Changed
 
 - Migrated legacy VLESS `allowInsecure` imports to normal secure certificate verification with a compatibility warning, and added strict support for provider-supplied `pcs` certificate pins and `vcn` verification names.
 - Split netmon installation, daemon and backend states; AppImage now identifies the separately installed helper requirement, while reachable placeholder daemons report non-operational status explicitly.
 - Restricted the optional Debian helper to a dedicated non-login account, group-only socket and capability-free systemd sandbox; service activation remains administrator-controlled.
+- Centralized diagnostic privacy redaction and category-aware latest-error tracking so successful recovery clears only the corresponding stale error.
 
 ### Fixed
 
 - Stopped generating the Xray-core 26.3.27-removed `allowInsecure` field, invalidated stale saved-profile validation when the config schema or selected Xray identity changes, and sanitized Xray validation errors before displaying them.
 - Corrected Debian helper lifecycle handling and extracted-artifact verification without enabling or initially starting the opt-in service.
+- Redacted credentials, tokens, encoded URLs, certificates, pins, identifiers and home usernames before diagnostic display, clipboard placement, file saving or changed-path logging.
 
 ## [0.2.3] - 2026-07-29
 

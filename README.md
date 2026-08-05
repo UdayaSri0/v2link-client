@@ -255,6 +255,14 @@ Live counters are polled every 2 seconds, while cumulative history is persisted 
 
 The original progressive stutter came from coupling each live callback to synchronous SQLite writes, full dashboard/history refreshes, and increasingly large chart reads. Those paths are now separated and bounded. See [Traffic Monitor internals](docs/traffic-monitor.md) and [runtime performance troubleshooting](docs/runtime-performance-troubleshooting.md).
 
+## Safe diagnostics and error sharing
+
+The main **Diagnostics** tab provides **Copy diagnostics report**, **Copy latest error**, and **Save diagnostics report**. Profile validation failures have a separate **Copy validation error** action, and the Applications helper card can copy structured helper diagnostics. AppImage and Debian builds include the same actions.
+
+Displayed, copied, and saved diagnostic text is sanitized by default. Share/proxy URLs, UUIDs, email addresses, passwords, authentication and subscription tokens, API keys, cookies/session values, certificate/private-key material, certificate pins, and home-directory usernames are replaced with stable redaction placeholders. Reports are size-bounded and saved as UTF-8. There is no one-click raw-secret export.
+
+Review a report before posting it publicly; automatic redaction is a defensive boundary, not a guarantee about every future third-party error format. A copied Xray validation error confirms offline configuration syntax only—it does not prove that a remote server was contacted or is reachable.
+
 Bundled Xray-core is enough for proxy/profile tracking in official AppImage, `.deb`, and APT installs. Per-application tracking is separate and still needs the optional helper service described below.
 
 Daily totals are aggregated by sample date and are useful for range summaries. Session totals are grouped by each Start/Stop run, so a connection from 20:00 to 20:30 appears as one session under that date. CSV export supports daily summaries, session summaries, and selected-session samples.
@@ -308,6 +316,7 @@ Per-application attribution, when available, is not perfect with a local proxy. 
 - Closing V2Link stops only the GUI-owned Xray process group and temporary `xray api statsquery` child. The independent system `v2link-netmon.service` may remain running by design.
 - Python logs rotate at 2 MiB with five backups. `xray_stdout.log` is bounded to 2 MiB with two backups. Xray access logging is disabled by default; detailed bounded diagnostic logging can be enabled under **Xray Settings**.
 - AppImage builds work without the helper and report `external-helper-required` for optional per-application attribution.
+- For a support request, refresh the main **Diagnostics** tab and copy or save its sanitized report. **Copy latest error** selects the newest active actionable failure; successful recovery clears only that error category.
 
 ## Supported Link Scope
 
