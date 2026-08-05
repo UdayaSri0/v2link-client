@@ -199,6 +199,23 @@ def test_closing_window_does_not_start_stats_query() -> None:
     assert harness._thread_pool.workers == []
 
 
+def test_legacy_mock_application_rows_are_not_displayable() -> None:
+    from v2link_client.core.traffic_store import AppUsageSummary
+    from v2link_client.ui.traffic_monitor_widget import _without_legacy_mock_rows
+
+    mock_row = AppUsageSummary("mock", "Synthetic", "/usr/bin/synthetic", 10, 20)
+    real_row = AppUsageSummary(
+        "real",
+        "Measured",
+        "/usr/bin/measured",
+        30,
+        40,
+        source="netmon-ebpf",
+    )
+
+    assert _without_legacy_mock_rows([mock_row, real_row]) == [real_row]
+
+
 def test_expensive_runtime_diagnostics_are_queued_not_run_in_gui_callback() -> None:
     from v2link_client.ui.main_window import MainWindow
 

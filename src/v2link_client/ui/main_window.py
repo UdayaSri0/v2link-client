@@ -137,10 +137,12 @@ ERROR_SOURCE_TRAFFIC_STORE = "Traffic database"
 
 NETMON_INFORMATIONAL_REASONS = {
     "backend-not-implemented",
+    "counters-unavailable",
     "external-helper-required",
     "helper-not-installed",
     "mock-inactive",
     "operational",
+    "socket-missing",
     "tracking-disabled",
 }
 NETMON_ERROR_REASONS = {
@@ -325,7 +327,9 @@ class MainWindow(QMainWindow):
             self._latest_error_state
         )
         self._traffic_settings: TrafficSettings = load_traffic_settings()
-        self._netmon_client = NetmonClient(provider=self._traffic_settings.netmon_provider)
+        self._netmon_client = NetmonClient(
+            provider=self._effective_netmon_provider(self._traffic_settings)
+        )
         if self._traffic_settings.app_tracking_enabled:
             self._netmon_client.start_tracking()
         self._last_traffic_store_error: str | None = None
@@ -621,6 +625,11 @@ class MainWindow(QMainWindow):
         MainWindow._clear_latest_error(self, ERROR_SOURCE_XRAY_VALIDATION)
 
     def _sync_netmon_latest_error(self, state: dict[str, object]) -> None:
+        settings = getattr(self, "_traffic_settings", None)
+        if settings is not None and not settings.app_tracking_enabled:
+            MainWindow._clear_latest_error(self, ERROR_SOURCE_NETMON)
+            return
+
         reason = str(state.get("reason_code") or "unknown").strip().lower()
         daemon_state = str(state.get("daemon_state") or "unknown").strip().lower()
         backend_state = str(state.get("backend_state") or "unknown").strip().lower()
@@ -643,6 +652,8 @@ class MainWindow(QMainWindow):
             effective_reason = "service-failed" if daemon_state == "failed" else daemon_state
 
         if effective_reason not in NETMON_ERROR_REASONS:
+            if daemon_state in {"disabled", "inactive", "reachable", "socket-missing"}:
+                MainWindow._clear_latest_error(self, ERROR_SOURCE_NETMON)
             return
 
         message = str(state.get("message") or "The optional netmon helper reported an error.")
@@ -2168,7 +2179,9 @@ class MainWindow(QMainWindow):
         if not isinstance(settings, TrafficSettings):
             return
         self._traffic_settings = settings
-        self._netmon_client = NetmonClient(provider=settings.netmon_provider)
+        self._netmon_client = NetmonClient(
+            provider=self._effective_netmon_provider(settings)
+        )
         if settings.app_tracking_enabled:
             self._netmon_client.start_tracking()
         else:
@@ -2180,6 +2193,13 @@ class MainWindow(QMainWindow):
                 force=True,
             )
         self._update_diagnostics_runtime_state()
+
+    @staticmethod
+    def _effective_netmon_provider(settings: TrafficSettings) -> str:
+        """Avoid touching the optional helper while app tracking is disabled."""
+        if not settings.app_tracking_enabled:
+            return "disabled"
+        return settings.netmon_provider
 
     def _tcp_reachable(self, host: str, port: int, *, timeout_s: float = 0.25) -> bool:
         try:

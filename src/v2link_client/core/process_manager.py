@@ -8,10 +8,12 @@ The UI intentionally keeps policy decisions simple:
 
 from __future__ import annotations
 
+import codecs
 import errno
 import logging
 import os
 from pathlib import Path
+import re
 import socket
 import subprocess
 import threading
@@ -36,6 +38,13 @@ logger = logging.getLogger(__name__)
 
 XRAY_STDOUT_MAX_BYTES = 2 * 1024 * 1024
 XRAY_STDOUT_BACKUP_COUNT = 2
+
+_PEM_BEGIN_LINE = re.compile(
+    r"-----BEGIN (?:[A-Z0-9 ]+ )?(?:CERTIFICATE|PRIVATE KEY)-----"
+)
+_PEM_END_LINE = re.compile(
+    r"-----END (?:[A-Z0-9 ]+ )?(?:CERTIFICATE|PRIVATE KEY)-----"
+)
 
 
 CoreBinary = XrayBinary
@@ -256,19 +265,63 @@ def _pump_bounded_stdout(proc: subprocess.Popen[bytes], path: Path) -> None:
     stream = proc.stdout
     if stream is None:
         return
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    pending = ""
+    inside_pem = False
     try:
         while True:
             chunk = stream.read1(64 * 1024)
             if not chunk:
+                pending += decoder.decode(b"", final=True)
+                pending = _bound_pending_output(pending)
+                if pending:
+                    _, safe_text = _sanitize_xray_output_line(
+                        pending, inside_pem=inside_pem
+                    )
+                    if safe_text:
+                        _append_bounded(path, safe_text.encode("utf-8"))
                 return
-            _append_bounded(path, chunk)
+            pending += decoder.decode(chunk)
+            while "\n" in pending:
+                line, pending = pending.split("\n", 1)
+                inside_pem, safe_text = _sanitize_xray_output_line(
+                    f"{line}\n", inside_pem=inside_pem
+                )
+                if safe_text:
+                    _append_bounded(path, safe_text.encode("utf-8"))
+            pending = _bound_pending_output(pending)
     except (OSError, ValueError):
         logger.debug("Xray stdout stream closed during shutdown", exc_info=True)
 
 
+def _sanitize_xray_output_line(line: str, *, inside_pem: bool) -> tuple[bool, str]:
+    """Sanitize one complete Xray output line before it reaches persistent logs."""
+    if inside_pem:
+        return (not bool(_PEM_END_LINE.search(line))), ""
+    if _PEM_BEGIN_LINE.search(line):
+        return (not bool(_PEM_END_LINE.search(line))), "<redacted>\n"
+    return False, sanitize_sensitive_text(line)
+
+
+def _bound_pending_output(text: str) -> str:
+    """Bound an unterminated output line without leaving malformed UTF-8."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= XRAY_STDOUT_MAX_BYTES:
+        return text
+    return encoded[-XRAY_STDOUT_MAX_BYTES :].decode("utf-8", errors="ignore")
+
+
 def _append_bounded(path: Path, chunk: bytes) -> None:
+    # Keep this final write boundary defensive even when a caller other than
+    # the managed stream pump supplies bytes directly.
+    safe_text = sanitize_sensitive_text(chunk.decode("utf-8", errors="replace"))
+    chunk = safe_text.encode("utf-8")
     if len(chunk) > XRAY_STDOUT_MAX_BYTES:
-        chunk = chunk[-XRAY_STDOUT_MAX_BYTES :]
+        chunk = (
+            chunk[-XRAY_STDOUT_MAX_BYTES :]
+            .decode("utf-8", errors="ignore")
+            .encode("utf-8")
+        )
     current_size = path.stat().st_size if path.exists() else 0
     if current_size + len(chunk) > XRAY_STDOUT_MAX_BYTES:
         _rotate_log(path)

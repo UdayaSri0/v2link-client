@@ -94,6 +94,11 @@ NOTICE_DETAILS_TEXT = (
 TRAFFIC_MONITOR_DOCS_URL = "https://github.com/UdayaSri0/v2link-client/blob/beta/docs/traffic-monitor.md"
 
 
+def _without_legacy_mock_rows(rows: list[AppUsageSummary]) -> list[AppUsageSummary]:
+    """Never surface application counters created by the retired mock provider."""
+    return [row for row in rows if row.source != "mock"]
+
+
 class TrafficTaskSignals(QObject):
     result = pyqtSignal(object)
     error = pyqtSignal(str)
@@ -1172,6 +1177,8 @@ class TrafficMonitorWidget(QWidget):
                 rows = live_rows
         elif self._store is not None:
             rows = self._store.get_today_app_usage()
+
+        rows = _without_legacy_mock_rows(rows)
 
         filter_text = self.app_filter_input.text().strip().lower() if hasattr(self, "app_filter_input") else ""
         if filter_text:

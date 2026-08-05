@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
 import json
 import os
 from pathlib import Path
@@ -18,7 +17,7 @@ from v2link_client.core.system_subprocess import (
     detect_runtime_kind,
     system_which,
 )
-from v2link_client.core.traffic_store import AppIdentity, AppUsageSummary, _now, _to_iso
+from v2link_client.core.traffic_store import AppUsageSummary
 
 DEFAULT_SOCKET_PATH = "/run/v2link-client/netmon.sock"
 DEFAULT_HELPER_BINARY_PATH = "/usr/lib/v2link-client/v2link-netmon"
@@ -57,6 +56,7 @@ class NetmonStatus:
     helper_binary_path: str | None = DEFAULT_HELPER_BINARY_PATH
     service_unit_path: str | None = DEFAULT_SERVICE_UNIT_PATH
     service_state: str | None = None
+    counters_available: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,10 +83,14 @@ class NetmonClient:
         probe_ttl_seconds: float = INSTALLATION_PROBE_TTL_SECONDS,
         runtime_kind: str | None = None,
     ) -> None:
-        self.provider = provider.strip().lower() or "disabled"
+        requested_provider = provider.strip().lower() or "disabled"
+        self.provider = (
+            requested_provider
+            if requested_provider in {"disabled", "socket"}
+            else "disabled"
+        )
         self.socket_path = socket_path
         self.api_url = api_url
-        self._tracking = False
         self._last_response: str | None = None
         self.helper_binary_path = helper_binary_path
         self.service_unit_paths = service_unit_paths
@@ -99,26 +103,6 @@ class NetmonClient:
         self._probe_cache = None
 
     def get_status(self) -> NetmonStatus:
-        if self.provider == "mock":
-            return NetmonStatus(
-                installed=True,
-                running=self._tracking,
-                permission_ok=True,
-                message="Mock per-application tracking provider is active for development.",
-                socket_path=self.socket_path,
-                api_url=self.api_url,
-                last_response=self._last_response or "mock status ok",
-                kernel_support="mock",
-                provider="mock",
-                backend="mock",
-                kernel_supported=True,
-                last_error=None,
-                operational=self._tracking,
-                installation_state="installed",
-                daemon_state="reachable" if self._tracking else "inactive",
-                backend_state="operational" if self._tracking else "unavailable",
-                reason_code="operational" if self._tracking else "mock-inactive",
-            )
         if self.provider == "socket":
             evidence = self._installation_evidence()
             try:
@@ -211,70 +195,31 @@ class NetmonClient:
     def get_live_apps(self) -> list[AppUsageSummary]:
         if self.provider == "socket":
             return self._apps_from_endpoint("/live")
-        if self.provider != "mock":
-            self._last_response = "helper unavailable"
-            return []
-        self._last_response = "mock live apps returned"
-        return _mock_apps(live=True)
+        self._last_response = "helper unavailable"
+        return []
 
     def get_today_app_usage(self) -> list[AppUsageSummary]:
         if self.provider == "socket":
             return self._apps_from_endpoint("/apps/today")
-        if self.provider != "mock":
-            self._last_response = "helper unavailable"
-            return []
-        self._last_response = "mock today usage returned"
-        return _mock_apps(live=False)
+        self._last_response = "helper unavailable"
+        return []
 
     def get_history(self, days: int = 30) -> list[AppUsageSummary]:
         if self.provider == "socket":
             query = urlencode({"days": max(1, int(days))})
             return self._apps_from_endpoint(f"/apps/history?{query}")
-        if self.provider != "mock":
-            self._last_response = "helper unavailable"
-            return []
-        days = max(1, int(days))
-        today = _now().date()
-        rows: list[AppUsageSummary] = []
-        for offset in range(min(days, 7)):
-            date = (today - timedelta(days=offset)).isoformat()
-            for app in _mock_apps(live=False):
-                rows.append(
-                    AppUsageSummary(
-                        app_id=app.app_id,
-                        app_name=app.app_name,
-                        executable_path=app.executable_path,
-                        rx_bytes=max(0, app.rx_bytes - offset * 12_000),
-                        tx_bytes=max(0, app.tx_bytes - offset * 4_000),
-                        download_bps=0.0,
-                        upload_bps=0.0,
-                        last_seen=date,
-                        confidence=app.confidence,
-                        source=app.source,
-                        pid=app.pid,
-                        uid=app.uid,
-                    )
-                )
-        self._last_response = "mock history returned"
-        return rows
+        self._last_response = "helper unavailable"
+        return []
 
     def start_tracking(self) -> NetmonStatus:
         if self.provider == "socket":
             self._last_response = "using socket helper"
             return self.get_status()
-        if self.provider != "mock":
-            self._last_response = "start ignored: helper unavailable"
-            return self.get_status()
-        self._tracking = True
-        self._last_response = "mock tracking started"
+        self._last_response = "start ignored: helper unavailable"
         return self.get_status()
 
     def stop_tracking(self) -> NetmonStatus:
-        if self.provider == "mock":
-            self._tracking = False
-            self._last_response = "mock tracking stopped"
-        else:
-            self._last_response = "stop ignored: helper unavailable"
+        self._last_response = "stop ignored: helper unavailable"
         return self.get_status()
 
     def _apps_from_endpoint(self, path: str) -> list[AppUsageSummary]:
@@ -285,14 +230,18 @@ class NetmonClient:
             return []
         self._last_response = f"{path} ok"
         status_payload = payload.get("status") if isinstance(payload, dict) else None
-        if isinstance(status_payload, dict):
-            backend = _string_field(status_payload, "backend", "unknown")
-            backend_state = _backend_state(status_payload, backend)
-            if not (
-                backend_state == "operational"
-                and _bool_field(status_payload, "operational", default=False)
-            ):
-                return []
+        # Fail closed: application rows are trustworthy only when the same
+        # response explicitly confirms a real operational counter backend.
+        if not isinstance(status_payload, dict):
+            return []
+        backend = _string_field(status_payload, "backend", "unknown")
+        backend_state = _backend_state(status_payload, backend)
+        if not (
+            backend_state == "operational"
+            and _bool_field(status_payload, "operational", default=False)
+            and _bool_field(status_payload, "counters_available", default=False)
+        ):
+            return []
         raw_apps = payload.get("apps", []) if isinstance(payload, dict) else []
         if not isinstance(raw_apps, list):
             return []
@@ -350,51 +299,6 @@ class NetmonClient:
         if not isinstance(payload, dict):
             raise NetmonUnavailableError("invalid-response", "v2link-netmon helper returned an invalid response.")
         return payload
-
-
-def _mock_apps(*, live: bool) -> list[AppUsageSummary]:
-    timestamp = _to_iso()
-    return [
-        AppUsageSummary(
-            app_id="mock-firefox",
-            app_name="Firefox",
-            executable_path="/usr/lib/firefox/firefox",
-            rx_bytes=82_500_000,
-            tx_bytes=7_200_000,
-            download_bps=180_000.0 if live else 0.0,
-            upload_bps=24_000.0 if live else 0.0,
-            last_seen=timestamp,
-            confidence="high",
-            source="mock",
-            pid=4242 if live else None,
-            uid=1000,
-        ),
-        AppUsageSummary(
-            app_id="mock-code",
-            app_name="Visual Studio Code",
-            executable_path="/usr/share/code/code",
-            rx_bytes=21_000_000,
-            tx_bytes=3_100_000,
-            download_bps=42_000.0 if live else 0.0,
-            upload_bps=8_000.0 if live else 0.0,
-            last_seen=timestamp,
-            confidence="medium",
-            source="mock",
-            pid=5151 if live else None,
-            uid=1000,
-        ),
-    ]
-
-
-def mock_identity(summary: AppUsageSummary) -> AppIdentity:
-    return AppIdentity(
-        id=summary.app_id,
-        name=summary.app_name,
-        executable_path=summary.executable_path,
-        pid=summary.pid,
-        uid=summary.uid,
-        trusted_identity=summary.confidence in {"exact", "high"},
-    )
 
 
 def _unavailable_status(
@@ -485,14 +389,26 @@ def _status_from_payload(
     evidence: _InstallationEvidence,
 ) -> NetmonStatus:
     backend = _string_field(payload, "backend", "unknown")
-    backend_state = _backend_state(payload, backend)
+    reported_backend_state = _backend_state(payload, backend)
+    counters_available = _bool_field(payload, "counters_available", default=False)
     # Fail closed: a legacy or malformed response without an explicit boolean
     # cannot claim that production counters are available.
-    operational = backend_state == "operational" and _bool_field(
-        payload, "operational", default=False
+    operational = (
+        reported_backend_state == "operational"
+        and _bool_field(payload, "operational", default=False)
+        and counters_available
+    )
+    backend_state = (
+        "unavailable"
+        if reported_backend_state == "operational" and not operational
+        else reported_backend_state
     )
     kernel_supported = _optional_bool(payload.get("kernel_supported"))
-    reason_code = _string_field(payload, "reason_code", "operational" if operational else backend_state)
+    reason_code = _string_field(
+        payload, "reason_code", "operational" if operational else backend_state
+    )
+    if not operational and reason_code == "operational":
+        reason_code = "counters-unavailable"
     raw_error = payload.get("last_error") or payload.get("backend_error")
     safe_error = sanitize_sensitive_text(str(raw_error)) if raw_error not in {None, ""} else None
     return NetmonStatus(
@@ -523,6 +439,7 @@ def _status_from_payload(
         helper_binary_path=evidence.helper_binary_path,
         service_unit_path=evidence.service_unit_path,
         service_state=evidence.service_state or "active",
+        counters_available=counters_available,
     )
 
 

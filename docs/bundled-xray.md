@@ -90,7 +90,7 @@ To update the pinned release:
 
 The fetch script fails if checksums are placeholders or if the archive structure no longer contains `xray`, `geoip.dat`, `geosite.dat`, and `LICENSE`.
 
-Official v0.2.2 binary artifacts target x86-64. The aarch64 mapping and runtime
+Official binary artifacts currently target x86-64. The aarch64 mapping and runtime
 discovery remain available for source development, but ARM64 packages must not be
 published until they are built and verified in native ARM64 CI.
 

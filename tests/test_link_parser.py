@@ -6,7 +6,7 @@ from v2link_client.core.errors import InvalidLinkError, UnsupportedSchemeError
 from v2link_client.core.link_parser import VlessLink, parse_link
 
 
-USER_ID = "b345f204-4df1-4d31-8243-dae7845099ad"
+USER_ID = "11111111-1111-4111-8111-111111111111"
 PIN_A = "01" * 32
 PIN_B = "aB" * 32
 
@@ -17,32 +17,32 @@ def _link(query: str = "security=tls") -> str:
 
 def test_parse_vless_basic() -> None:
     link = (
-        "vless://b345f204-4df1-4d31-8243-dae7845099ad@prime.example.com:443"
-        "?security=tls&allowInsecure=0&encryption=none&type=tcp&sni=aka.ms&fp=chrome&headerType=none"
-        "#UdayaSri"
+        f"vless://{USER_ID}@server.invalid:443"
+        "?security=tls&allowInsecure=0&encryption=none&type=tcp&sni=edge.invalid&fp=chrome&headerType=none"
+        "#Synthetic%20profile"
     )
     parsed = parse_link(link)
     assert isinstance(parsed, VlessLink)
-    assert parsed.user_id == "b345f204-4df1-4d31-8243-dae7845099ad"
-    assert parsed.host == "prime.example.com"
+    assert parsed.user_id == USER_ID
+    assert parsed.host == "server.invalid"
     assert parsed.port == 443
     assert parsed.security == "tls"
     assert parsed.legacy_allow_insecure is False
     assert parsed.transport == "tcp"
-    assert parsed.sni == "aka.ms"
+    assert parsed.sni == "edge.invalid"
     assert parsed.fingerprint == "chrome"
-    assert parsed.name == "UdayaSri"
+    assert parsed.name == "Synthetic profile"
 
 
 def test_parse_vless_rejects_invalid_uuid() -> None:
-    link = "vless://not-a-uuid@prime.example.com:443?security=tls"
+    link = "vless://not-a-uuid@server.invalid:443?security=tls"
     with pytest.raises(InvalidLinkError):
         parse_link(link)
 
 
 def test_parse_rejects_unsupported_scheme() -> None:
     with pytest.raises(UnsupportedSchemeError):
-        parse_link("http://example.com")
+        parse_link("http://example.invalid")
 
 
 def test_parse_rejects_unimplemented_scheme() -> None:

@@ -15,6 +15,10 @@ from v2link_client.ui.main_window import MainWindow
 
 
 def main() -> int:
+    if len(sys.argv) == 2 and sys.argv[1] in {"--version", "-V"}:
+        print(__version__)
+        return 0
+
     ensure_dirs()
     setup_logging()
     app = QApplication(sys.argv)

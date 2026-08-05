@@ -68,6 +68,8 @@ grep -Fq 'XRAY_LOCATION_ASSET="${APPDIR}/usr/bin/xray"' "${APP_EXTRACT}/squashfs
 APP_VERSION_OUTPUT="$(XRAY_LOCATION_ASSET="${APP_ASSETS}" "${APP_XRAY}" version)"
 [[ "${APP_VERSION_OUTPUT}" == *"Xray ${XRAY_VERSION#v}"* ]] || fail "AppImage Xray version mismatch"
 [[ "$(<"${APP_ASSETS}/VERSION")" == "${XRAY_VERSION}" ]] || fail "AppImage VERSION mismatch"
+[[ "$("${APP_EXTRACT}/squashfs-root/AppRun" --version)" == "${PROJECT_VERSION}" ]] || \
+  fail "AppImage application runtime version mismatch"
 
 CONFIG="${TMP_DIR}/minimal-xray.json"
 printf '%s\n' '{"log":{"loglevel":"none"},"inbounds":[],"outbounds":[{"protocol":"freedom","settings":{}}]}' >"${CONFIG}"
@@ -106,6 +108,8 @@ grep -Fq 'XRAY_LOCATION_ASSET="/opt/v2link-client/xray"' "${DEB_ROOT}/usr/bin/v2
 DEB_VERSION_OUTPUT="$(XRAY_LOCATION_ASSET="${DEB_ASSETS}" "${DEB_XRAY}" version)"
 [[ "${DEB_VERSION_OUTPUT}" == *"Xray ${XRAY_VERSION#v}"* ]] || fail "Debian Xray version mismatch"
 [[ "$(<"${DEB_ASSETS}/VERSION")" == "${XRAY_VERSION}" ]] || fail "Debian VERSION mismatch"
+[[ "$("${DEB_ROOT}/opt/v2link-client/v2link-client" --version)" == "${PROJECT_VERSION}" ]] || \
+  fail "Debian application runtime version mismatch"
 XRAY_LOCATION_ASSET="${DEB_ASSETS}" "${DEB_XRAY}" run -test -c "${CONFIG}" >/dev/null
 [[ "$(dpkg-deb -f "${DEB}" Architecture)" == "amd64" ]] || fail "Debian package is not amd64"
 [[ "$(dpkg-deb -f "${DEB}" Version)" == "${PROJECT_VERSION}" ]] || fail "Debian package version mismatch"

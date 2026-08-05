@@ -42,6 +42,7 @@ PYTHONPATH="${ROOT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}" \
   --name "${APP_NAME}" \
   --icon "${ROOT_DIR}/packaging/icon.png" \
   --add-data "${ROOT_DIR}/packaging/icon.png:." \
+  --add-data "${ROOT_DIR}/pyproject.toml:." \
   --paths "${ROOT_DIR}/src" \
   --distpath "${DIST_DIR}" \
   --workpath "${WORK_DIR}" \

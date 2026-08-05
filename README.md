@@ -2,7 +2,7 @@
 
 A focused Linux desktop client for V2Ray-style links, built with Python 3.11+, PyQt6, and Xray-core.
 
-**Current release:** v0.2.3 · **Status:** Beta (stable for daily use with a focused feature scope)
+**Current release:** v0.2.4 · **Status:** Beta (stable for daily use with a focused feature scope)
 
 [Download the latest release](https://github.com/UdayaSri0/v2link-client/releases/latest) · [Changelog](CHANGELOG.md) · [Developer guide](docs/development.md)
 

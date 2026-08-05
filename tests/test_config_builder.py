@@ -11,11 +11,13 @@ from v2link_client.core.config_builder import (
 from v2link_client.core.errors import ConfigBuildError
 from v2link_client.core.link_parser import parse_link
 
+SYNTHETIC_USER_ID = "11111111-1111-4111-8111-111111111111"
+
 
 def test_build_xray_config_for_vless_tls(tmp_path) -> None:
     parsed = parse_link(
-        "vless://b345f204-4df1-4d31-8243-dae7845099ad@prime.example.com:443"
-        "?security=tls&allowInsecure=0&encryption=none&type=tcp&sni=aka.ms&fp=chrome"
+        f"vless://{SYNTHETIC_USER_ID}@server.invalid:443"
+        "?security=tls&allowInsecure=0&encryption=none&type=tcp&sni=edge.invalid&fp=chrome"
     )
     cfg = build_xray_config(parsed, logs_dir=tmp_path)
 
@@ -30,17 +32,17 @@ def test_build_xray_config_for_vless_tls(tmp_path) -> None:
     outbound = cfg["outbounds"][0]
     assert outbound["protocol"] == "vless"
     vnext = outbound["settings"]["vnext"][0]
-    assert vnext["address"] == "prime.example.com"
+    assert vnext["address"] == "server.invalid"
     assert vnext["port"] == 443
-    assert vnext["users"][0]["id"] == "b345f204-4df1-4d31-8243-dae7845099ad"
+    assert vnext["users"][0]["id"] == SYNTHETIC_USER_ID
 
     stream = outbound["streamSettings"]
     assert stream["network"] == "tcp"
     assert stream["security"] == "tls"
-    assert stream["tlsSettings"]["serverName"] == "aka.ms"
+    assert stream["tlsSettings"]["serverName"] == "edge.invalid"
     assert "allowInsecure" not in stream["tlsSettings"]
     assert stream["tlsSettings"]["fingerprint"] == "chrome"
-    assert stream["tlsSettings"]["verifyPeerCertByName"] == "aka.ms,prime.example.com"
+    assert stream["tlsSettings"]["verifyPeerCertByName"] == "edge.invalid,server.invalid"
 
 
 def _contains_key(value, key: str) -> bool:
@@ -94,7 +96,7 @@ def test_tls_without_sni_uses_host_without_empty_modern_fields(tmp_path) -> None
 
 def test_detailed_xray_logging_is_opt_in_and_keeps_access_disabled(tmp_path) -> None:
     parsed = parse_link(
-        "vless://11111111-1111-1111-1111-111111111111@example.com:443"
+        f"vless://{SYNTHETIC_USER_ID}@server.invalid:443"
         "?security=tls&type=tcp"
     )
 
@@ -105,7 +107,7 @@ def test_detailed_xray_logging_is_opt_in_and_keeps_access_disabled(tmp_path) -> 
 
 def test_build_xray_config_rejects_grpc_without_service_name(tmp_path) -> None:
     parsed = parse_link(
-        "vless://b345f204-4df1-4d31-8243-dae7845099ad@prime.example.com:443"
+        f"vless://{SYNTHETIC_USER_ID}@server.invalid:443"
         "?security=tls&type=grpc"
     )
     with pytest.raises(ConfigBuildError):
@@ -114,20 +116,20 @@ def test_build_xray_config_rejects_grpc_without_service_name(tmp_path) -> None:
 
 def test_build_xray_config_supports_ws(tmp_path) -> None:
     parsed = parse_link(
-        "vless://b345f204-4df1-4d31-8243-dae7845099ad@prime.example.com:443"
-        "?security=tls&type=ws&path=%2Fwebsocket&host=cdn.example.com"
+        f"vless://{SYNTHETIC_USER_ID}@server.invalid:443"
+        "?security=tls&type=ws&path=%2Fwebsocket&host=cdn.invalid"
     )
     cfg = build_xray_config(parsed, logs_dir=tmp_path)
     stream = cfg["outbounds"][0]["streamSettings"]
     assert stream["network"] == "ws"
     assert stream["wsSettings"]["path"] == "/websocket"
-    assert stream["wsSettings"]["headers"]["Host"] == "cdn.example.com"
+    assert stream["wsSettings"]["headers"]["Host"] == "cdn.invalid"
 
 
 def test_build_xray_config_includes_stats_api_when_api_port_set(tmp_path) -> None:
     parsed = parse_link(
-        "vless://b345f204-4df1-4d31-8243-dae7845099ad@prime.example.com:443"
-        "?security=tls&allowInsecure=0&encryption=none&type=tcp&sni=aka.ms&fp=chrome"
+        f"vless://{SYNTHETIC_USER_ID}@server.invalid:443"
+        "?security=tls&allowInsecure=0&encryption=none&type=tcp&sni=edge.invalid&fp=chrome"
     )
     cfg = build_xray_config(parsed, logs_dir=tmp_path, api_port=12345)
 

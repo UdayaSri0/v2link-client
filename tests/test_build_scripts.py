@@ -8,9 +8,26 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_project_version_is_release_target() -> None:
     import tomllib
+    from v2link_client.version import get_project_version
 
     data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    assert data["project"]["version"] == "0.2.3"
+    assert data["project"]["version"] == "0.2.4"
+    assert get_project_version() == data["project"]["version"]
+
+
+def test_release_documentation_matches_project_version() -> None:
+    import tomllib
+
+    version = tomllib.loads(
+        (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]["version"]
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    release_notes = (ROOT / "docs" / "releases" / f"v{version}.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert f"## [{version}] - 2026-08-05" in changelog
+    assert release_notes.startswith(f"# v2link-client v{version}\n")
 
 
 def test_fetch_xray_script_pins_official_release_and_sha() -> None:
@@ -52,6 +69,12 @@ def test_build_scripts_contain_xray_copy_checks() -> None:
     assert "verify_release_artifacts.sh" in release
 
 
+def test_pyinstaller_bundles_authoritative_version_metadata() -> None:
+    script = (ROOT / "scripts" / "build_pyinstaller.sh").read_text(encoding="utf-8")
+
+    assert '--add-data "${ROOT_DIR}/pyproject.toml:."' in script
+
+
 def test_runtime_diagnostic_script_is_private_and_read_only() -> None:
     script_path = ROOT / "scripts" / "diagnose_runtime_performance.sh"
     script = script_path.read_text(encoding="utf-8")
@@ -70,7 +93,7 @@ def test_build_scripts_use_release_artifact_naming() -> None:
 
     assert '${APP_NAME}-${VERSION_NAME}-linux-${ARCH_NAME}.AppImage' in appimage
     assert '${APP_NAME}_${VERSION_NAME}_${ARCH_NAME}.deb' in deb
-    assert "sha256sum ./*.AppImage ./*.deb > SHA256SUMS" in release
+    assert "sha256sum *.AppImage *.deb > SHA256SUMS" in release
 
 
 def test_appimagetool_is_versioned_and_checksum_verified() -> None:
@@ -94,6 +117,8 @@ def test_release_verifier_inspects_extracted_artifacts() -> None:
     assert "root:root" in script
     assert "systemd-analyze verify" in script
     assert "SHA256SUMS lacks current artifact" in script
+    assert "AppImage application runtime version mismatch" in script
+    assert "Debian application runtime version mismatch" in script
 
 
 def test_debian_build_stages_complete_netmon_lifecycle() -> None:

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from v2link_client.core.errors import ConfigBuildError, InvalidLinkError
 from v2link_client.core.latest_error import LatestErrorStore
+from v2link_client.core.traffic_settings import TrafficSettings
 from v2link_client.ui.main_window import (
     ERROR_SOURCE_NETMON,
     ERROR_SOURCE_PROFILE_IMPORT,
@@ -190,4 +191,38 @@ def test_structured_netmon_failure_becomes_sanitized_error_then_clears() -> None
         window,
         {"reason_code": "backend-not-implemented", "backend_state": "not-implemented"},
     )
+    assert window._latest_errors.latest_active() is None
+
+
+def test_expected_missing_socket_clears_an_earlier_netmon_error() -> None:
+    window = _window()
+    window._latest_errors.record(ERROR_SOURCE_NETMON, "Earlier helper failure")
+
+    MainWindow._sync_netmon_latest_error(
+        window,
+        {
+            "reason_code": "socket-missing",
+            "daemon_state": "socket-missing",
+            "backend_state": "unknown",
+        },
+    )
+
+    assert window._latest_errors.latest_active() is None
+
+
+def test_disabled_tracking_does_not_poll_or_retain_helper_errors() -> None:
+    settings = TrafficSettings(app_tracking_enabled=False, netmon_provider="socket")
+    window = _window(_traffic_settings=settings)
+    window._latest_errors.record(ERROR_SOURCE_NETMON, "Earlier helper failure")
+
+    assert MainWindow._effective_netmon_provider(settings) == "disabled"
+    MainWindow._sync_netmon_latest_error(
+        window,
+        {
+            "reason_code": "permission-denied",
+            "daemon_state": "permission-denied",
+            "backend_state": "unknown",
+        },
+    )
+
     assert window._latest_errors.latest_active() is None

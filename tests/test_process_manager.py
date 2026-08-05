@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import os
 from pathlib import Path
 import shutil
@@ -12,6 +13,7 @@ from v2link_client.core.errors import ConfigBuildError, PortInUseError
 from v2link_client.core.process_manager import (
     XrayProcessManager,
     _append_bounded,
+    _pump_bounded_stdout,
     ensure_port_available,
     find_xray_binary,
     validate_xray_config,
@@ -120,11 +122,87 @@ def test_xray_stdout_rotation_is_bounded(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(process_manager, "XRAY_STDOUT_MAX_BYTES", 64)
     path = tmp_path / "xray_stdout.log"
-    _append_bounded(path, b"a" * 48)
-    _append_bounded(path, b"b" * 48)
+    _append_bounded(path, b"Xray component warning line\n" * 2)
+    _append_bounded(path, b"Xray transport warning line\n" * 2)
+    _append_bounded(path, b"Xray routing warning line\n" * 2)
 
     assert path.stat().st_size <= 64
     assert (tmp_path / "xray_stdout.log.1").stat().st_size <= 64
+    assert (tmp_path / "xray_stdout.log.2").stat().st_size <= 64
+    assert not (tmp_path / "xray_stdout.log.3").exists()
+
+
+class _SyntheticProcess:
+    def __init__(self, output: bytes) -> None:
+        self.stdout = io.BytesIO(output)
+
+
+def test_xray_stdout_log_sanitizes_live_pipe_before_write(tmp_path) -> None:
+    secret_uuid = "12345678-1234-4234-8234-123456789abc"
+    secret_pin = "a1" * 32
+    secret_url = (
+        f"vless://{secret_uuid}@example.invalid:443?token=fixture-token"
+    )
+    path = tmp_path / "xray_stdout.log"
+    output = (
+        "transport/internet/tls: rejected pinnedPeerCertSha256: verification failed\n"
+        f"profile={secret_url}\n"
+        "password=fixture-password user=person@example.invalid\n"
+        f"config=/home/fixture-user/.config/v2link pin={secret_pin}\n"
+        "-----BEGIN CERTIFICATE-----\n"
+        "c3ludGhldGljLWNlcnRpZmljYXRlLWJvZHk=\n"
+        "-----END CERTIFICATE-----\n"
+    ).encode("utf-8")
+
+    _pump_bounded_stdout(_SyntheticProcess(output), path)  # type: ignore[arg-type]
+
+    logged = path.read_text(encoding="utf-8")
+    for secret in (
+        secret_url,
+        secret_uuid,
+        secret_pin,
+        "fixture-token",
+        "fixture-password",
+        "person@example.invalid",
+        "fixture-user",
+        "c3ludGhldGljLWNlcnRpZmljYXRlLWJvZHk=",
+        "BEGIN CERTIFICATE",
+        "END CERTIFICATE",
+    ):
+        assert secret not in logged
+    assert "transport/internet/tls" in logged
+    assert "pinnedPeerCertSha256" in logged
+    assert "verification failed" in logged
+    assert "<redacted>" in logged
+    assert logged.count("\n") >= 4
+
+
+def test_xray_stdout_log_handles_chunk_splits_and_malformed_utf8(tmp_path) -> None:
+    class _FragmentedStream:
+        def __init__(self, fragments: list[bytes]) -> None:
+            self._fragments = iter(fragments)
+
+        def read1(self, _size: int) -> bytes:
+            return next(self._fragments, b"")
+
+    class _FragmentedProcess:
+        stdout = _FragmentedStream(
+            [
+                b"dns: pass",
+                b"word=split-secret rejected ",
+                b"\xffwithout crash\n",
+            ]
+        )
+
+    path = tmp_path / "xray_stdout.log"
+    _pump_bounded_stdout(_FragmentedProcess(), path)  # type: ignore[arg-type]
+
+    logged = path.read_text(encoding="utf-8")
+    assert "split-secret" not in logged
+    assert "dns" in logged
+    assert "rejected" in logged
+    assert "without crash" in logged
+    assert "\ufffd" in logged
 
 
 def test_xray_manager_kills_child_after_group_leader_exits(tmp_path, monkeypatch) -> None:

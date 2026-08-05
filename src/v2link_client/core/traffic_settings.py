@@ -42,7 +42,12 @@ def load_traffic_settings(path: Path | None = None) -> TrafficSettings:
     if daily_retention_days not in DAILY_RETENTION_OPTIONS:
         daily_retention_days = DEFAULT_DAILY_RETENTION_DAYS
     provider = str(payload.get("netmon_provider", "socket") or "socket").strip().lower()
-    if provider not in {"disabled", "mock", "socket"}:
+    # The historical mock provider fabricated counters and must never be
+    # restored from production settings. Preserve an explicit disabled choice;
+    # unknown providers continue to fall back to the real local helper.
+    if provider == "mock":
+        provider = "disabled"
+    elif provider not in {"disabled", "socket"}:
         provider = "socket"
 
     return TrafficSettings(

@@ -26,7 +26,7 @@ def test_disabled_netmon_client_returns_clean_status() -> None:
     assert client.get_history(days=7) == []
 
 
-def test_mock_netmon_client_returns_data() -> None:
+def test_development_mock_provider_fails_closed_without_fabricated_data() -> None:
     client = NetmonClient(provider="mock")
 
     status = client.start_tracking()
@@ -34,14 +34,13 @@ def test_mock_netmon_client_returns_data() -> None:
     today = client.get_today_app_usage()
     history = client.get_history(days=3)
 
-    assert status.installed is True
-    assert status.running is True
-    assert status.permission_ok is True
-    assert apps
-    assert today
-    assert history
-    assert all(app.source == "mock" for app in apps)
-    assert {app.confidence for app in apps} <= {"high", "medium", "low", "unknown", "exact"}
+    assert client.provider == "disabled"
+    assert status.running is False
+    assert status.operational is False
+    assert status.reason_code == "tracking-disabled"
+    assert apps == []
+    assert today == []
+    assert history == []
 
 
 def test_socket_netmon_client_parses_daemon_responses(tmp_path) -> None:
@@ -59,9 +58,14 @@ def test_socket_netmon_client_parses_daemon_responses(tmp_path) -> None:
                     request = conn.recv(4096).decode("ascii")
                     if "GET /status " in request:
                         payload = {
+                            "api_version": 2,
                             "installed": True,
                             "running": True,
                             "backend": "ebpf",
+                            "backend_state": "operational",
+                            "reason_code": "operational",
+                            "operational": True,
+                            "counters_available": True,
                             "permission_ok": True,
                             "kernel_supported": True,
                             "started_at": "2026-05-01T00:00:00Z",
@@ -71,6 +75,14 @@ def test_socket_netmon_client_parses_daemon_responses(tmp_path) -> None:
                     else:
                         payload = {
                             "timestamp": "2026-05-01T00:00:01Z",
+                            "status": {
+                                "api_version": 2,
+                                "backend": "ebpf",
+                                "backend_state": "operational",
+                                "reason_code": "operational",
+                                "operational": True,
+                                "counters_available": True,
+                            },
                             "apps": [
                                 {
                                     "identity": {
@@ -110,6 +122,8 @@ def test_socket_netmon_client_parses_daemon_responses(tmp_path) -> None:
     assert status.running is True
     assert status.backend == "ebpf"
     assert status.kernel_supported is True
+    assert status.operational is True
+    assert status.counters_available is True
     assert len(apps) == 1
     assert apps[0].app_name == "Firefox"
     assert apps[0].rx_bytes == 123456
@@ -226,6 +240,30 @@ def test_appimage_socket_provider_without_helper_requires_external_helper(monkey
         ({"api_version": 2, "backend": "ebpf-unavailable", "reason_code": "backend-not-implemented", "operational": False}, "not-implemented", False),
         ({"api_version": 2, "backend": "ebpf", "reason_code": "kernel-unsupported", "operational": False, "kernel_supported": False}, "kernel-unsupported", False),
         ({"api_version": 2, "backend": "ebpf", "reason_code": "backend-initialization-failed", "operational": False}, "initialization-failed", False),
+        (
+            {
+                "api_version": 2,
+                "backend": "ebpf",
+                "backend_state": "operational",
+                "reason_code": "operational",
+                "operational": True,
+                "counters_available": False,
+            },
+            "unavailable",
+            False,
+        ),
+        (
+            {
+                "api_version": 2,
+                "backend": "ebpf",
+                "backend_state": "operational",
+                "reason_code": "operational",
+                "operational": True,
+                "counters_available": True,
+            },
+            "operational",
+            True,
+        ),
     ],
 )
 def test_old_and_new_status_payloads(monkeypatch, payload, backend_state, operational) -> None:
@@ -298,6 +336,70 @@ def test_non_operational_v2_response_cannot_supply_app_rows(monkeypatch) -> None
     })
 
     assert client.get_live_apps() == []
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        None,
+        "operational",
+        {
+            "api_version": 2,
+            "backend": "ebpf",
+            "backend_state": "operational",
+            "operational": True,
+            "counters_available": False,
+        },
+    ],
+)
+def test_app_rows_require_explicit_operational_counters(monkeypatch, status) -> None:
+    client = NetmonClient(provider="socket")
+    payload = {
+        "apps": [
+            {
+                "app_id": "synthetic-app",
+                "name": "Synthetic",
+                "executable_path": "/usr/bin/synthetic",
+                "rx_bytes": 123,
+            }
+        ]
+    }
+    if status is not None:
+        payload["status"] = status
+    monkeypatch.setattr(client, "_request_json", lambda _path: payload)
+
+    assert client.get_live_apps() == []
+
+
+def test_operational_counter_response_can_supply_app_rows(monkeypatch) -> None:
+    client = NetmonClient(provider="socket")
+    monkeypatch.setattr(
+        client,
+        "_request_json",
+        lambda _path: {
+            "status": {
+                "api_version": 2,
+                "backend": "ebpf",
+                "backend_state": "operational",
+                "operational": True,
+                "counters_available": True,
+            },
+            "apps": [
+                {
+                    "app_id": "synthetic-app",
+                    "name": "Synthetic",
+                    "executable_path": "/usr/bin/synthetic",
+                    "rx_bytes": 123,
+                    "tx_bytes": 45,
+                }
+            ],
+        },
+    )
+
+    apps = client.get_live_apps()
+
+    assert len(apps) == 1
+    assert apps[0].app_id == "synthetic-app"
 
 
 def test_installation_probe_cache_and_refresh(monkeypatch, tmp_path) -> None:
