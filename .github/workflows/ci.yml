@@ -142,7 +142,7 @@ jobs:
           test "$(dpkg-deb -f dist/v2link-client_0.2.4_amd64.deb Version)" = "0.2.4"
           test "$(dpkg-deb -f dist/v2link-client_0.2.4_amd64.deb Architecture)" = amd64
           grep -Fq "v26.3.27" packaging/xray-release.json
-          sha256sum -c dist/SHA256SUMS
+          (cd dist && sha256sum -c SHA256SUMS)
 
       - name: Upload temporary CI artifacts
         uses: actions/upload-artifact@v4
