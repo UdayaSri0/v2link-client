@@ -10,6 +10,7 @@ import subprocess
 import sys
 from typing import Iterable, Literal
 
+from v2link_client.core.logging_setup import sanitize_sensitive_text
 from v2link_client.core.system_subprocess import build_xray_subprocess_env, system_which
 from v2link_client.core.xray_settings import load_xray_settings
 
@@ -190,16 +191,20 @@ def validate_xray_binary(
     except subprocess.TimeoutExpired:
         return XrayBinary(display_path, source, None, False, "Timed out while checking Xray version.")
     except OSError as exc:
-        detail = "Xray executable has the wrong architecture." if getattr(exc, "errno", None) == 8 else f"Could not run Xray: {exc}"
+        detail = (
+            "Xray executable has the wrong architecture."
+            if getattr(exc, "errno", None) == 8
+            else sanitize_sensitive_text(f"Could not run Xray: {exc}")
+        )
         return XrayBinary(display_path, source, None, False, detail)
 
     output = "\n".join(part for part in (result.stdout, result.stderr) if part)
     version = _parse_version(output)
     if result.returncode != 0:
-        detail = output.strip() or f"exit code {result.returncode}"
+        detail = sanitize_sensitive_text(output.strip()) or f"exit code {result.returncode}"
         return XrayBinary(display_path, source, version, False, f"Xray version check failed: {detail}")
     if version is None:
-        detail = output.strip() or "no version output"
+        detail = sanitize_sensitive_text(output.strip()) or "no version output"
         return XrayBinary(display_path, source, None, False, f"Selected file does not look like Xray-core: {detail}")
 
     manifest_status = "unavailable"

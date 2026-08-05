@@ -12,7 +12,7 @@ WRAPPER_TEMPLATE="${DEB_TEMPLATE_DIR}/v2link-client-wrapper.in"
 DESKTOP_SRC="${DEB_TEMPLATE_DIR}/v2link-client.desktop"
 ICON_SRC="${ROOT_DIR}/packaging/icon.png"
 NETMON_SERVICE_SRC="${DEB_TEMPLATE_DIR}/v2link-netmon.service"
-DEPENDS="libegl1, libgl1, libxkbcommon-x11-0, libdbus-1-3, libxcb-cursor0"
+DEPENDS="adduser, init-system-helpers, libegl1, libgl1, libxkbcommon-x11-0, libdbus-1-3, libxcb-cursor0"
 
 if [[ ! -d "${PYINSTALLER_DIR}" ]]; then
   "${ROOT_DIR}/scripts/build_pyinstaller.sh"
@@ -27,6 +27,7 @@ for required_file in \
   "${ICON_SRC}" \
   "${NETMON_SERVICE_SRC}" \
   "${DEB_TEMPLATE_DIR}/postinst" \
+  "${DEB_TEMPLATE_DIR}/prerm" \
   "${DEB_TEMPLATE_DIR}/postrm"; do
   if [[ ! -f "${required_file}" ]]; then
     echo "Error: required file not found: ${required_file}" >&2
@@ -159,9 +160,10 @@ sed \
   "${CONTROL_TEMPLATE}" >"${DEBIAN_DIR}/control"
 
 cp "${DEB_TEMPLATE_DIR}/postinst" "${DEBIAN_DIR}/postinst"
+cp "${DEB_TEMPLATE_DIR}/prerm" "${DEBIAN_DIR}/prerm"
 cp "${DEB_TEMPLATE_DIR}/postrm" "${DEBIAN_DIR}/postrm"
 
-chmod 0755 "${BIN_DIR}/${APP_NAME}" "${DEBIAN_DIR}/postinst" "${DEBIAN_DIR}/postrm"
+chmod 0755 "${BIN_DIR}/${APP_NAME}" "${DEBIAN_DIR}/postinst" "${DEBIAN_DIR}/prerm" "${DEBIAN_DIR}/postrm"
 chmod 0755 "${OPT_DIR}/${APP_NAME}" || true
 chmod 0755 "${OPT_DIR}/xray/xray"
 chmod 0755 "${LIB_DIR}/v2link-netmon"

@@ -11,7 +11,14 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 
 mkdir -p "${OUT_DIR}"
-cargo build --manifest-path "${NETMON_DIR}/Cargo.toml" --release -p v2link-netmon
+NETMON_RUSTFLAGS="${RUSTFLAGS:-}"
+for source_prefix in "${ROOT_DIR}" "${HOME:-}"; do
+  if [[ -n "${source_prefix}" && "${source_prefix}" == /* ]]; then
+    NETMON_RUSTFLAGS="${NETMON_RUSTFLAGS:+${NETMON_RUSTFLAGS} }--remap-path-prefix=${source_prefix}=."
+  fi
+done
+RUSTFLAGS="${NETMON_RUSTFLAGS}" \
+  cargo build --manifest-path "${NETMON_DIR}/Cargo.toml" --release -p v2link-netmon
 cp "${NETMON_DIR}/target/release/v2link-netmon" "${OUT_DIR}/v2link-netmon"
 chmod 0755 "${OUT_DIR}/v2link-netmon"
 

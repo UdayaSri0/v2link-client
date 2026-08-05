@@ -199,6 +199,23 @@ def test_closing_window_does_not_start_stats_query() -> None:
     assert harness._thread_pool.workers == []
 
 
+def test_legacy_mock_application_rows_are_not_displayable() -> None:
+    from v2link_client.core.traffic_store import AppUsageSummary
+    from v2link_client.ui.traffic_monitor_widget import _without_legacy_mock_rows
+
+    mock_row = AppUsageSummary("mock", "Synthetic", "/usr/bin/synthetic", 10, 20)
+    real_row = AppUsageSummary(
+        "real",
+        "Measured",
+        "/usr/bin/measured",
+        30,
+        40,
+        source="netmon-ebpf",
+    )
+
+    assert _without_legacy_mock_rows([mock_row, real_row]) == [real_row]
+
+
 def test_expensive_runtime_diagnostics_are_queued_not_run_in_gui_callback() -> None:
     from v2link_client.ui.main_window import MainWindow
 
@@ -350,4 +367,40 @@ def test_large_export_task_runs_outside_gui_callback(tmp_path) -> None:
         app.processEvents()
         time.sleep(0.005)
     assert widget._export_in_flight is False
+    widget.close()
+
+
+def test_traffic_worker_and_error_labels_sanitize_sensitive_text(tmp_path) -> None:
+    app = _app()
+    from v2link_client.core.traffic_store import TrafficStore
+    from v2link_client.ui.traffic_monitor_widget import (
+        TrafficMonitorWidget,
+        TrafficTaskWorker,
+    )
+
+    secret = (
+        "vless://11111111-1111-1111-1111-111111111111@example.invalid"
+        "?token=SYNTH_TRAFFIC_SECRET"
+    )
+    emitted: list[str] = []
+    worker = TrafficTaskWorker(lambda: (_ for _ in ()).throw(RuntimeError(secret)))
+    worker.signals.error.connect(emitted.append)
+    worker.run()
+    app.processEvents()
+
+    assert emitted
+    assert secret not in emitted[0]
+    assert "SYNTH_TRAFFIC_SECRET" not in emitted[0]
+
+    widget = TrafficMonitorWidget(TrafficStore(tmp_path / "traffic.sqlite3"))
+    widget._history_query_generation = 4
+    widget._selected_history_session_id = "synthetic-session"
+    widget._on_session_detail_error(4, "synthetic-session", secret)
+    assert secret not in widget.store_error_label.text()
+    assert "SYNTH_TRAFFIC_SECRET" not in widget.store_error_label.text()
+
+    widget._export_in_flight = True
+    widget._on_export_error(secret)
+    assert secret not in widget.store_error_label.text()
+    assert "SYNTH_TRAFFIC_SECRET" not in widget.store_error_label.text()
     widget.close()

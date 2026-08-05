@@ -2,7 +2,7 @@
 
 A focused Linux desktop client for V2Ray-style links, built with Python 3.11+, PyQt6, and Xray-core.
 
-**Current release:** v0.2.3 · **Status:** Beta (stable for daily use with a focused feature scope)
+**Current release:** v0.2.4 · **Status:** Beta (stable for daily use with a focused feature scope)
 
 [Download the latest release](https://github.com/UdayaSri0/v2link-client/releases/latest) · [Changelog](CHANGELOG.md) · [Developer guide](docs/development.md)
 
@@ -255,6 +255,14 @@ Live counters are polled every 2 seconds, while cumulative history is persisted 
 
 The original progressive stutter came from coupling each live callback to synchronous SQLite writes, full dashboard/history refreshes, and increasingly large chart reads. Those paths are now separated and bounded. See [Traffic Monitor internals](docs/traffic-monitor.md) and [runtime performance troubleshooting](docs/runtime-performance-troubleshooting.md).
 
+## Safe diagnostics and error sharing
+
+The main **Diagnostics** tab provides **Copy diagnostics report**, **Copy latest error**, and **Save diagnostics report**. Profile validation failures have a separate **Copy validation error** action, and the Applications helper card can copy structured helper diagnostics. AppImage and Debian builds include the same actions.
+
+Displayed, copied, and saved diagnostic text is sanitized by default. Share/proxy URLs, UUIDs, email addresses, passwords, authentication and subscription tokens, API keys, cookies/session values, certificate/private-key material, certificate pins, and home-directory usernames are replaced with stable redaction placeholders. Reports are size-bounded and saved as UTF-8. There is no one-click raw-secret export.
+
+Review a report before posting it publicly; automatic redaction is a defensive boundary, not a guarantee about every future third-party error format. A copied Xray validation error confirms offline configuration syntax only—it does not prove that a remote server was contacted or is reachable.
+
 Bundled Xray-core is enough for proxy/profile tracking in official AppImage, `.deb`, and APT installs. Per-application tracking is separate and still needs the optional helper service described below.
 
 Daily totals are aggregated by sample date and are useful for range summaries. Session totals are grouped by each Start/Stop run, so a connection from 20:00 to 20:30 appears as one session under that date. CSV export supports daily summaries, session summaries, and selected-session samples.
@@ -275,16 +283,20 @@ $XDG_CONFIG_HOME/v2link-client/traffic_settings.json
 
 ## Per-Application Tracking
 
-Per-application tracking is advanced and optional. It is separate from normal proxy/profile traffic tracking, which works through Xray's Stats API without root permission. True Linux app attribution needs the optional privileged helper service `v2link-netmon`, because process/executable attribution must happen outside the unprivileged GUI. The GUI never runs as root.
+Per-application tracking is advanced and optional. It is separate from normal proxy/profile traffic tracking, which works through Xray's Stats API without root permission. The optional system helper `v2link-netmon` is installed by Debian/APT packages under a dedicated non-login account. The GUI never runs as root.
 
-Debian packages install the optional helper and systemd service, but do not enable it automatically:
+The v0.2.4 helper backend is an explicit non-operational placeholder: it reports `backend-not-implemented` and returns no fabricated application counters. A future production eBPF backend requires a separate implementation and privilege review.
+
+Debian packages do not enable or initially start the service, and they do not add desktop users to its group. An administrator may opt in explicitly:
 
 ```bash
+sudo usermod -aG v2link-netmon "$USER"
 sudo systemctl enable --now v2link-netmon
-sudo systemctl disable --now v2link-netmon
 ```
 
-The helper exposes read-only JSON stats over `/run/v2link-client/netmon.sock`. In v0.2.1 this integration remains a prepared, optional path rather than guaranteed full attribution. If the helper, permissions, or eBPF backend are unavailable, the GUI stays unprivileged and shows a clear unavailable/diagnostic state.
+Log out and back in after the group change. The helper socket is restricted to the service account and approved group members. Installed, daemon-reachable, and backend-operational are separate states; a running placeholder is not operational.
+
+AppImage remains unprivileged and does not contain or install the system helper. It reports that a separately installed `v2link-netmon` system helper is required, while normal proxy operation and aggregate Xray traffic history remain available.
 
 ## Privacy
 
@@ -297,12 +309,14 @@ Per-application attribution, when available, is not perfect with a local proxy. 
 ## Troubleshooting Traffic Monitor
 
 - If proxy/profile totals stay at zero, confirm Xray is running and the diagnostics tab shows a configured stats API server.
-- If the Applications tab says the helper is unavailable, enable the optional service with `sudo systemctl enable --now v2link-netmon`.
-- If the helper is running but eBPF is unavailable, check Traffic Monitor diagnostics for kernel/capability details.
+- If the Applications tab says the installed service is inactive, opt in with the administrator-controlled commands above.
+- If access is denied, confirm group membership and log out/in; do not run the GUI as root.
+- If the daemon is reachable but reports `backend-not-implemented`, per-application attribution is unavailable in this release by design.
 - For growing CPU, memory, logs, or suspected leftover processes, run `./scripts/diagnose_runtime_performance.sh` as your normal user. It prints aggregate sizes and process metadata, never profile URLs, credentials, traffic rows, or process arguments. Exit code `1` means it found a possible stale Xray/stats process to inspect; it never kills anything.
 - Closing V2Link stops only the GUI-owned Xray process group and temporary `xray api statsquery` child. The independent system `v2link-netmon.service` may remain running by design.
 - Python logs rotate at 2 MiB with five backups. `xray_stdout.log` is bounded to 2 MiB with two backups. Xray access logging is disabled by default; detailed bounded diagnostic logging can be enabled under **Xray Settings**.
-- AppImage builds work without the helper and will show the helper-unavailable state.
+- AppImage builds work without the helper and report `external-helper-required` for optional per-application attribution.
+- For a support request, refresh the main **Diagnostics** tab and copy or save its sanitized report. **Copy latest error** selects the newest active actionable failure; successful recovery clears only that error category.
 
 ## Supported Link Scope
 
@@ -311,7 +325,7 @@ Currently implemented:
 - `vless://`
 - `security=tls` and `security=none`
 - transport: `tcp`, `ws`, `grpc`
-- optional: `sni`, `fp`, `alpn`, `allowInsecure`, `flow`
+- optional: `sni`, `fp`, `alpn`, `pcs`, `vcn`, `flow`
 - limited `headerType=http` handling for TCP
 
 Not yet implemented:
@@ -337,13 +351,23 @@ Unset XDG variables use the normal Linux defaults under `~/.config`, `~/.local/s
 Common causes:
 
 - Invalid endpoint or blocked server
-- Mismatched `sni` and certificate with strict TLS verification (`allowInsecure=0`)
+- Mismatched `sni`/verification name and the server certificate
+- A legacy profile that depended on the removed `allowInsecure` certificate bypass
 
 Actions:
 
-- verify link/server settings
-- try `sni` aligned with target host
+- verify link/server settings without pasting the complete profile URL into reports
+- obtain a current profile from the service provider when the legacy profile no longer verifies
+- use provider-supplied `pcs` certificate SHA-256 pins and/or `vcn` certificate verification names when required
 - inspect logs via **Open logs folder**
+
+Xray-core 26.3.27 no longer accepts the legacy `allowInsecure` bypass. v2link-client
+never emits that option. Legacy false values remain harmless, while legacy true
+values are migrated to normal secure certificate verification and produce a
+compatibility warning. If verification then fails, obtain an updated profile
+from the service provider. The application never invents a certificate pin or
+retrieves one from a remote server. Imported `pcs` values must be valid SHA-256
+certificate fingerprints; `vcn` values select certificate verification names.
 
 ### Qt xcb plugin error (`libxcb-cursor.so.0`)
 

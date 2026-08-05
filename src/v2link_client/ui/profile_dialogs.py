@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
 )
 
 from v2link_client.core.profile_store import Profile, ProfileStore, basic_url_prefix_valid, detect_protocol
+from v2link_client.ui.safe_text_actions import copy_sanitized_text, prepare_safe_text
 
 ValidateFn = Callable[[str], tuple[bool, str]]
 
@@ -43,6 +44,7 @@ class ProfileEditorDialog(QDialog):
         self._validate_fn = validate_fn
         self._profile = profile
         self._is_edit = profile is not None
+        self._validation_error_text: str | None = None
 
         self.setWindowTitle("Edit Profile" if self._is_edit else "Add Profile")
         self.setModal(True)
@@ -64,9 +66,20 @@ class ProfileEditorDialog(QDialog):
 
         self.validation_label = QLabel("")
         self.validation_label.setWordWrap(True)
+        self.validation_copy_hint = QLabel("")
+        self.validation_copy_hint.setWordWrap(True)
+        self.validation_copy_hint.setProperty("role", "hint")
 
         self.validate_button = QPushButton("Validate")
         self.validate_button.setProperty("variant", "ghost")
+        self.copy_validation_error_button = QPushButton("Copy validation error")
+        self.copy_validation_error_button.setProperty("variant", "ghost")
+        self.copy_validation_error_button.setAccessibleName("Copy validation error")
+        self.copy_validation_error_button.setToolTip(
+            "Copy sanitized profile validation details without the profile URL"
+        )
+        self.copy_validation_error_button.setEnabled(False)
+        self.copy_validation_error_button.setVisible(False)
 
         form = QGridLayout()
         form.setHorizontalSpacing(10)
@@ -79,6 +92,7 @@ class ProfileEditorDialog(QDialog):
         url_actions = QHBoxLayout()
         url_actions.setSpacing(8)
         url_actions.addWidget(self.validate_button)
+        url_actions.addWidget(self.copy_validation_error_button)
         url_actions.addStretch(1)
 
         form.addWidget(QLabel("Notes"), 2, 0, alignment=Qt.AlignmentFlag.AlignTop)
@@ -104,13 +118,15 @@ class ProfileEditorDialog(QDialog):
         layout.addLayout(form)
         layout.addLayout(url_actions)
         layout.addWidget(self.validation_label)
+        layout.addWidget(self.validation_copy_hint)
         layout.addLayout(checks_row)
         layout.addWidget(self.buttons)
         self.setLayout(layout)
 
         self.validate_button.clicked.connect(self._on_validate_clicked)
+        self.copy_validation_error_button.clicked.connect(self._copy_validation_error)
         self.name_input.textChanged.connect(self._refresh_save_enabled)
-        self.url_input.textChanged.connect(self._refresh_save_enabled)
+        self.url_input.textChanged.connect(self._on_url_changed)
         self.buttons.accepted.connect(self._on_accept_clicked)
         self.buttons.rejected.connect(self.reject)
 
@@ -122,6 +138,11 @@ class ProfileEditorDialog(QDialog):
         url_ok = bool(url) and basic_url_prefix_valid(url)
         if self.save_button is not None:
             self.save_button.setEnabled(name_ok and url_ok)
+
+    def _on_url_changed(self) -> None:
+        self._refresh_save_enabled()
+        self._clear_validation_error()
+        self.validation_label.clear()
 
     def _on_validate_clicked(self) -> None:
         url = self.url_input.text().strip()
@@ -136,11 +157,35 @@ class ProfileEditorDialog(QDialog):
         self._set_validation_message(message, ok=ok)
 
     def _set_validation_message(self, message: str, *, ok: bool) -> None:
-        self.validation_label.setText(message)
+        safe_message = prepare_safe_text(message)
+        self.validation_label.setText(safe_message)
+        self.validation_copy_hint.clear()
         if ok:
+            self._clear_validation_error()
             self.validation_label.setStyleSheet("color: #2e7d32; font-weight: 600;")
         else:
+            timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+            self._validation_error_text = (
+                "Profile validation error\n"
+                f"Timestamp: {timestamp}\n"
+                "Category: profile validation\n"
+                f"Details: {safe_message}"
+            )
+            self.copy_validation_error_button.setEnabled(True)
+            self.copy_validation_error_button.setVisible(True)
             self.validation_label.setStyleSheet("color: #c62828; font-weight: 600;")
+
+    def _clear_validation_error(self) -> None:
+        self._validation_error_text = None
+        self.copy_validation_error_button.setEnabled(False)
+        self.copy_validation_error_button.setVisible(False)
+
+    def _copy_validation_error(self) -> None:
+        result = copy_sanitized_text(
+            self._validation_error_text,
+            label="profile validation error",
+        )
+        self.validation_copy_hint.setText(result.message)
 
     def _on_accept_clicked(self) -> None:
         self._refresh_save_enabled()

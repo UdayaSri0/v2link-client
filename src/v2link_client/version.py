@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from functools import lru_cache
 from importlib import metadata
 from pathlib import Path
@@ -25,16 +26,23 @@ def _normalize_version(value: str) -> str:
 
 
 def _read_pyproject_version() -> str | None:
-    """Read local project version when running from source tree."""
-    pyproject_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
-    if not pyproject_path.exists():
-        return None
-    try:
-        data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
-        return None
-    version = str(data.get("project", {}).get("version", "")).strip()
-    return version or None
+    """Read the authoritative version from source or bundled project metadata."""
+    candidates = [Path(__file__).resolve().parents[2] / "pyproject.toml"]
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    if frozen_root:
+        candidates.insert(0, Path(frozen_root) / "pyproject.toml")
+
+    for pyproject_path in candidates:
+        if not pyproject_path.is_file():
+            continue
+        try:
+            data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        version = str(data.get("project", {}).get("version", "")).strip()
+        if version:
+            return version
+    return None
 
 
 def get_project_version() -> str:

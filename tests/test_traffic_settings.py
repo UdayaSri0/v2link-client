@@ -26,13 +26,26 @@ def test_traffic_settings_load_save(tmp_path) -> None:
         show_experimental_warning=False,
         detailed_retention_days=90,
         daily_retention_days=365,
-        netmon_provider="mock",
+        netmon_provider="disabled",
     )
 
     save_traffic_settings(expected, path)
     loaded = load_traffic_settings(path)
 
     assert loaded == expected
+
+
+def test_legacy_mock_provider_is_disabled_in_production_settings(tmp_path) -> None:
+    path = tmp_path / "traffic_settings.json"
+    path.write_text(
+        '{"app_tracking_enabled": true, "netmon_provider": "mock"}',
+        encoding="utf-8",
+    )
+
+    settings = load_traffic_settings(path)
+
+    assert settings.app_tracking_enabled is True
+    assert settings.netmon_provider == "disabled"
 
 
 def test_traffic_settings_sanitizes_invalid_values(tmp_path) -> None:

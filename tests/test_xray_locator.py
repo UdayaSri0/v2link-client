@@ -182,3 +182,22 @@ def test_version_check_receives_asset_environment(tmp_path) -> None:
 
     assert result.valid is True
     assert marker.read_text(encoding="utf-8") == str(fake.parent.resolve())
+
+
+def test_failed_version_output_is_sanitized_before_display(tmp_path) -> None:
+    secret_uuid = "11111111-1111-1111-1111-111111111111"
+    fake = _fake_xray(
+        tmp_path / "xray",
+        output=(
+            "component pinnedPeerCertSha256 rejected "
+            f"vless://{secret_uuid}@example.invalid?token=synthetic-secret"
+        ),
+    )
+
+    result = locator.validate_xray_binary(fake)
+
+    assert result.valid is False
+    assert "pinnedPeerCertSha256" in (result.error or "")
+    assert secret_uuid not in (result.error or "")
+    assert "synthetic-secret" not in (result.error or "")
+    assert "vless://<redacted>" in (result.error or "")

@@ -39,16 +39,23 @@ from v2link_client.core.config_builder import (
     DEFAULT_SOCKS_PORT,
     build_xray_config,
 )
-from v2link_client.core.errors import AppError
+from v2link_client.core.errors import (
+    AppError,
+    InvalidLinkError,
+    UnsupportedSchemeError,
+)
 from v2link_client.core.health_check import ProxyHealthResult, check_http_proxy
 from v2link_client.core.humanize import format_bytes, format_duration_s, format_mbps
 from v2link_client.core.link_parser import parse_link
+from v2link_client.core.latest_error import LatestErrorStore
+from v2link_client.core.logging_setup import sanitize_sensitive_text
 from v2link_client.core.netmon_client import NetmonClient
 from v2link_client.core.net_probe import ServerPingResult, ping_server
 from v2link_client.core.profile_store import (
     Profile,
     ProfileStore,
     connection_fingerprint,
+    xray_binary_identity,
 )
 from v2link_client.core.proxy_manager import (
     SystemProxyAuditResult,
@@ -84,6 +91,7 @@ from v2link_client.core.xray_locator import (
 from v2link_client.core.xray_settings import XraySettings, load_xray_settings, save_xray_settings
 from v2link_client.ui.diagnostics_widget import DiagnosticsWidget
 from v2link_client.ui.profile_dialogs import ProfileEditorDialog, ProfileManagerDialog
+from v2link_client.ui.safe_text_actions import copy_sanitized_text
 from v2link_client.ui.theme import ThemeName, apply_theme, normalize_theme, theme_display_name
 from v2link_client.ui.traffic_monitor_widget import TrafficMonitorWidget
 
@@ -118,6 +126,37 @@ WINDOW_GEOMETRY_KEY = "window_geometry_v1"
 WINDOW_MAXIMIZED_KEY = "window_maximized"
 TRAFFIC_MONITOR_LAYOUT_KEY = "traffic_monitor_layout_v1"
 
+ERROR_SOURCE_PROFILE_IMPORT = "Profile import"
+ERROR_SOURCE_XRAY_VALIDATION = "Xray validation"
+ERROR_SOURCE_XRAY_STARTUP = "Xray startup"
+ERROR_SOURCE_XRAY_RUNTIME = "Xray runtime"
+ERROR_SOURCE_SYSTEM_PROXY = "System proxy"
+ERROR_SOURCE_NETMON = "Netmon helper"
+ERROR_SOURCE_DIAGNOSTICS = "Diagnostics collection"
+ERROR_SOURCE_TRAFFIC_STORE = "Traffic database"
+
+NETMON_INFORMATIONAL_REASONS = {
+    "backend-not-implemented",
+    "counters-unavailable",
+    "external-helper-required",
+    "helper-not-installed",
+    "mock-inactive",
+    "operational",
+    "socket-missing",
+    "tracking-disabled",
+}
+NETMON_ERROR_REASONS = {
+    "backend-initialization-failed",
+    "connection-refused",
+    "diagnostics-query-failed",
+    "invalid-response",
+    "kernel-unsupported",
+    "permission-denied",
+    "service-failed",
+    "socket-error",
+    "timeout",
+}
+
 
 class HealthCheckWorkerSignals(QObject):
     result = pyqtSignal(object)
@@ -134,7 +173,7 @@ class HealthCheckWorker(QRunnable):
         try:
             payload = self.fn()
         except Exception as exc:  # pragma: no cover - defensive
-            self.signals.error.emit(str(exc))
+            self.signals.error.emit(sanitize_sensitive_text(str(exc)))
             return
         self.signals.result.emit(payload)
 
@@ -144,6 +183,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._closing = False
         self._shutdown_complete = False
+        self._latest_errors = LatestErrorStore()
+        self._expected_core_stop = True
         self.setWindowTitle(f"v2link-client v{__version__}")
         self.resize(1180, 760)
         screen = QApplication.primaryScreen()
@@ -281,17 +322,30 @@ class MainWindow(QMainWindow):
         help_row.addWidget(self.about_button)
 
         self.diagnostics_widget = DiagnosticsWidget()
+        self.diagnostics_widget.set_latest_error_provider(self._latest_error_text)
+        self.diagnostics_widget.set_latest_error_state_provider(
+            self._latest_error_state
+        )
         self._traffic_settings: TrafficSettings = load_traffic_settings()
-        self._netmon_client = NetmonClient(provider=self._traffic_settings.netmon_provider)
+        self._netmon_client = NetmonClient(
+            provider=self._effective_netmon_provider(self._traffic_settings)
+        )
         if self._traffic_settings.app_tracking_enabled:
             self._netmon_client.start_tracking()
         self._last_traffic_store_error: str | None = None
         try:
             self._traffic_store: TrafficStore | None = TrafficStore()
         except Exception as exc:  # pragma: no cover - defensive startup guard
-            logger.exception("Failed to initialize traffic store")
+            safe_detail = sanitize_sensitive_text(str(exc))
+            logger.error("Failed to initialize traffic store: %s", safe_detail)
             self._traffic_store = None
-            self._last_traffic_store_error = str(exc)
+            self._last_traffic_store_error = safe_detail
+            self._record_latest_error(
+                ERROR_SOURCE_TRAFFIC_STORE,
+                "Traffic history storage could not be initialized.",
+                details=safe_detail,
+                reason_code="database-initialization-failed",
+            )
         self._traffic_storage_worker = (
             TrafficStorageWorker(self._traffic_store)
             if self._traffic_store is not None
@@ -348,7 +402,9 @@ class MainWindow(QMainWindow):
             socks_port=self._socks_port, http_port=self._http_port
         )
         self._thread_pool = QThreadPool.globalInstance()
-        self._profile_store = ProfileStore()
+        self._profile_store = ProfileStore(
+            xray_identity=xray_binary_identity(self._last_xray_resolution)
+        )
         self._selected_profile_id: str | None = None
         self._profile_selector_syncing = False
 
@@ -460,16 +516,33 @@ class MainWindow(QMainWindow):
         try:
             if self._system_proxy.restore_if_needed():
                 logger.info("Restored system proxy from previous session")
-        except Exception:
-            logger.exception("Failed to restore system proxy from previous session")
+                self._clear_latest_error(ERROR_SOURCE_SYSTEM_PROXY)
+        except Exception as exc:
+            safe_detail = sanitize_sensitive_text(str(exc))
+            logger.error(
+                "Failed to restore system proxy from previous session: %s", safe_detail
+            )
+            self._record_latest_error(
+                ERROR_SOURCE_SYSTEM_PROXY,
+                "Previous system proxy settings could not be restored.",
+                details=safe_detail,
+                reason_code="startup-proxy-restore-failed",
+            )
         try:
             if self._system_proxy.repair_stale_loopback_proxy():
                 logger.info("Repaired stale loopback proxy settings from previous session")
                 self.diagnostics_widget.set_hint(
                     "Detected stale system proxy settings and reset to no-proxy."
                 )
-        except Exception:
-            logger.exception("Failed to auto-repair stale loopback proxy settings")
+        except Exception as exc:
+            safe_detail = sanitize_sensitive_text(str(exc))
+            logger.error("Failed to auto-repair stale loopback proxy settings: %s", safe_detail)
+            self._record_latest_error(
+                ERROR_SOURCE_SYSTEM_PROXY,
+                "Stale system proxy settings could not be repaired.",
+                details=safe_detail,
+                reason_code="stale-proxy-repair-failed",
+            )
         self._update_diagnostics_runtime_state()
         if self._traffic_storage_worker is not None:
             self._traffic_storage_worker.submit_cleanup(
@@ -495,6 +568,108 @@ class MainWindow(QMainWindow):
         self.about_action = QAction("About", self)
         self.about_action.triggered.connect(self._show_about)
         help_menu.addAction(self.about_action)
+
+    def _record_latest_error(
+        self,
+        source: str,
+        summary: str,
+        *,
+        details: str = "",
+        reason_code: str | None = None,
+        severity: str = "error",
+    ) -> None:
+        store = getattr(self, "_latest_errors", None)
+        if store is None:
+            return
+        store.record(
+            source,
+            summary,
+            details=details,
+            severity=severity,
+            reason_code=reason_code,
+        )
+
+    def _clear_latest_error(self, source: str) -> None:
+        store = getattr(self, "_latest_errors", None)
+        if store is not None:
+            store.clear(source)
+
+    def _latest_error_text(self) -> str | None:
+        store = getattr(self, "_latest_errors", None)
+        if store is None or store.latest_active() is None:
+            return None
+        return store.format_latest(application_version=__version__)
+
+    def _latest_error_state(self) -> dict[str, str | None] | None:
+        store = getattr(self, "_latest_errors", None)
+        latest_error = store.latest_active() if store is not None else None
+        if latest_error is None:
+            return None
+        return {
+            "source": latest_error.source,
+            "summary": latest_error.summary,
+            "details": latest_error.details,
+            "timestamp": latest_error.timestamp.isoformat(timespec="seconds"),
+            "severity": latest_error.severity,
+            "reason_code": latest_error.reason_code,
+        }
+
+    @staticmethod
+    def _validation_error_source(exc: BaseException) -> str:
+        if isinstance(exc, (InvalidLinkError, UnsupportedSchemeError)):
+            return ERROR_SOURCE_PROFILE_IMPORT
+        return ERROR_SOURCE_XRAY_VALIDATION
+
+    def _clear_validation_errors(self) -> None:
+        MainWindow._clear_latest_error(self, ERROR_SOURCE_PROFILE_IMPORT)
+        MainWindow._clear_latest_error(self, ERROR_SOURCE_XRAY_VALIDATION)
+
+    def _sync_netmon_latest_error(self, state: dict[str, object]) -> None:
+        settings = getattr(self, "_traffic_settings", None)
+        if settings is not None and not settings.app_tracking_enabled:
+            MainWindow._clear_latest_error(self, ERROR_SOURCE_NETMON)
+            return
+
+        reason = str(state.get("reason_code") or "unknown").strip().lower()
+        daemon_state = str(state.get("daemon_state") or "unknown").strip().lower()
+        backend_state = str(state.get("backend_state") or "unknown").strip().lower()
+        if reason in NETMON_INFORMATIONAL_REASONS or backend_state == "not-implemented":
+            MainWindow._clear_latest_error(self, ERROR_SOURCE_NETMON)
+            return
+
+        effective_reason = reason
+        if backend_state == "kernel-unsupported":
+            effective_reason = "kernel-unsupported"
+        elif backend_state == "initialization-failed":
+            effective_reason = "backend-initialization-failed"
+        elif daemon_state in {
+            "permission-denied",
+            "connection-refused",
+            "timeout",
+            "invalid-response",
+            "failed",
+        }:
+            effective_reason = "service-failed" if daemon_state == "failed" else daemon_state
+
+        if effective_reason not in NETMON_ERROR_REASONS:
+            if daemon_state in {"disabled", "inactive", "reachable", "socket-missing"}:
+                MainWindow._clear_latest_error(self, ERROR_SOURCE_NETMON)
+            return
+
+        message = str(state.get("message") or "The optional netmon helper reported an error.")
+        detail_parts = [
+            str(value)
+            for value in (state.get("last_error"), state.get("remediation"))
+            if value not in {None, ""}
+        ]
+        MainWindow._record_latest_error(
+            self,
+            ERROR_SOURCE_NETMON,
+            message,
+            details="\n".join(detail_parts),
+            reason_code=effective_reason,
+            severity="warning",
+        )
 
     def _current_xray_resolution(self, *, refresh: bool = False) -> XrayBinary:
         process_binary = getattr(self._process, "_xray", None)
@@ -657,6 +832,7 @@ class MainWindow(QMainWindow):
                 result = locate_xray_binary()
 
             self._last_xray_resolution = result
+            self._profile_store.set_xray_identity(xray_binary_identity(result))
             self._reset_validation_state()
             self.diagnostics_widget.set_hint(
                 f"Xray settings updated: {self._xray_status_summary(result)}"
@@ -793,23 +969,44 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl(result.release_url))
             self.diagnostics_widget.set_hint("Opened release download page in your browser.")
         elif clicked == copy_button:
-            QApplication.clipboard().setText(download_url)
-            self.diagnostics_widget.set_hint("Release download link copied to clipboard.")
+            result = copy_sanitized_text(
+                download_url,
+                label="release download link",
+            )
+            self.diagnostics_widget.set_hint(result.message)
 
     def _on_validate_clicked(self) -> None:
         self._reset_validation_state()
         raw_link = self.link_input.text().strip()
+        existing_profile = self._profile_store.find_by_url(raw_link)
+        if existing_profile is not None:
+            self._profile_store.clear_profile_validation(existing_profile.id)
 
         try:
             parsed_link, config_path, xray, socks_port, http_port, api_port = self._validate_link(
                 raw_link, persist_runtime_config=True
             )
         except AppError as exc:
-            self.diagnostics_widget.set_hint(exc.user_message)
+            safe_detail = sanitize_sensitive_text(exc.user_message)
+            source = self._validation_error_source(exc)
+            self._record_latest_error(
+                source,
+                "Profile validation failed.",
+                details=safe_detail,
+                reason_code=type(exc).__name__,
+            )
+            self.diagnostics_widget.set_hint(safe_detail)
             return
         except Exception as exc:  # pragma: no cover - defensive
-            logger.exception("Validation failed")
-            self.diagnostics_widget.set_hint(f"Validation failed: {exc}")
+            safe_detail = sanitize_sensitive_text(str(exc))
+            logger.error("Validation failed: %s", safe_detail)
+            self._record_latest_error(
+                ERROR_SOURCE_XRAY_VALIDATION,
+                "Profile validation failed unexpectedly.",
+                details=safe_detail,
+                reason_code="unexpected-validation-error",
+            )
+            self.diagnostics_widget.set_hint(f"Validation failed: {safe_detail}")
             return
 
         saved_profile = self._handle_profile_save_after_validation(raw_link, parsed_link)
@@ -817,6 +1014,7 @@ class MainWindow(QMainWindow):
         if validation_profile is None:
             validation_profile = self._profile_store.find_by_url(raw_link)
         if validation_profile is not None:
+            self._profile_store.set_xray_identity(xray_binary_identity(xray))
             marked_profile = self._profile_store.mark_profile_validated(validation_profile.id)
             if marked_profile is not None:
                 validation_profile = marked_profile
@@ -835,6 +1033,7 @@ class MainWindow(QMainWindow):
             xray=xray,
         )
         self._last_xray_resolution = xray
+        self._clear_validation_errors()
 
         hint = (
             f"Validated: {parsed_link.display_name()}. "
@@ -849,7 +1048,7 @@ class MainWindow(QMainWindow):
             hint = f"{hint} Using existing saved profile."
         else:
             hint = f"{hint} URL validated but not saved as a profile."
-        self.diagnostics_widget.set_hint(hint)
+        self.diagnostics_widget.set_hint(sanitize_sensitive_text(hint))
         self._set_health_state("offline", "Not running")
 
     def _reset_validation_state(self) -> None:
@@ -941,11 +1140,14 @@ class MainWindow(QMainWindow):
         profile = self._profile_for_current_link()
         if profile is None:
             return False
+        self._profile_store.set_xray_identity(
+            xray_binary_identity(self._current_xray_resolution(refresh=False))
+        )
         if not self._profile_store.is_profile_validation_current(profile):
             return False
 
         fingerprint = connection_fingerprint(raw_link)
-        if not fingerprint or profile.validation_fingerprint != fingerprint:
+        if not fingerprint:
             return False
 
         if self._validated_fingerprint == fingerprint and self._validated_link is not None:
@@ -958,15 +1160,33 @@ class MainWindow(QMainWindow):
             parsed_link, config_path, socks_port, http_port, api_port = self._prepare_runtime_config(raw_link)
         except AppError as exc:
             self._profile_store.clear_profile_validation(profile.id)
+            safe_detail = sanitize_sensitive_text(exc.user_message)
+            self._record_latest_error(
+                self._validation_error_source(exc),
+                "Saved profile validation could not be restored.",
+                details=safe_detail,
+                reason_code=type(exc).__name__,
+            )
             self.diagnostics_widget.set_hint(
-                f"Saved validation expired for '{profile.name}': {exc.user_message}"
+                sanitize_sensitive_text(
+                    f"Saved validation expired for '{profile.name}': {safe_detail}"
+                )
             )
             return False
         except Exception as exc:  # pragma: no cover - defensive
-            logger.exception("Failed to restore saved validation for profile %s", profile.id)
+            safe_detail = sanitize_sensitive_text(str(exc))
+            logger.error("Failed to restore saved validation: %s", safe_detail)
             self._profile_store.clear_profile_validation(profile.id)
+            self._record_latest_error(
+                ERROR_SOURCE_XRAY_VALIDATION,
+                "Saved profile validation could not be restored.",
+                details=safe_detail,
+                reason_code="saved-validation-restore-failed",
+            )
             self.diagnostics_widget.set_hint(
-                f"Saved validation expired for '{profile.name}': {exc}"
+                sanitize_sensitive_text(
+                    f"Saved validation expired for '{profile.name}': {safe_detail}"
+                )
             )
             return False
 
@@ -980,7 +1200,10 @@ class MainWindow(QMainWindow):
             fingerprint=fingerprint,
         )
         if announce:
-            self.diagnostics_widget.set_hint(f"Loaded validated profile '{profile.name}'. Ready to start.")
+            self.diagnostics_widget.set_hint(
+                sanitize_sensitive_text(f"Loaded validated profile '{profile.name}'. Ready to start.")
+            )
+        self._clear_validation_errors()
         self._set_health_state("offline", "Not running")
         return True
 
@@ -1055,13 +1278,46 @@ class MainWindow(QMainWindow):
 
     def _validate_link_for_dialog(self, raw_link: str) -> tuple[bool, str]:
         try:
-            parsed_link, _, _, _, _, _ = self._validate_link(raw_link, persist_runtime_config=False)
+            parsed_link, _, xray, _, _, _ = self._validate_link(
+                raw_link, persist_runtime_config=False
+            )
         except AppError as exc:
-            return False, exc.user_message
+            existing = self._profile_store.find_by_url(raw_link)
+            if existing is not None:
+                self._profile_store.clear_profile_validation(existing.id)
+            safe_detail = sanitize_sensitive_text(exc.user_message)
+            MainWindow._record_latest_error(
+                self,
+                MainWindow._validation_error_source(exc),
+                "Profile validation failed.",
+                details=safe_detail,
+                reason_code=type(exc).__name__,
+            )
+            return False, safe_detail
         except Exception as exc:  # pragma: no cover - defensive
-            logger.exception("Validation failed in profile dialog")
-            return False, f"Validation failed: {exc}"
-        return True, f"Valid: {parsed_link.display_name()}"
+            safe_detail = sanitize_sensitive_text(str(exc))
+            logger.error("Validation failed in profile dialog: %s", safe_detail)
+            existing = self._profile_store.find_by_url(raw_link)
+            if existing is not None:
+                self._profile_store.clear_profile_validation(existing.id)
+            MainWindow._record_latest_error(
+                self,
+                ERROR_SOURCE_XRAY_VALIDATION,
+                "Profile validation failed unexpectedly.",
+                details=safe_detail,
+                reason_code="unexpected-validation-error",
+            )
+            return False, f"Validation failed: {safe_detail}"
+        existing = self._profile_store.find_by_url(raw_link)
+        if existing is not None:
+            self._profile_store.set_xray_identity(xray_binary_identity(xray))
+            self._profile_store.mark_profile_validated(existing.id)
+        message = f"Valid: {parsed_link.display_name()}"
+        warning = self._validation_warning(parsed_link)
+        if warning:
+            message = f"{message} Warning: {warning}"
+        MainWindow._clear_validation_errors(self)
+        return True, message
 
     def _handle_profile_save_after_validation(self, raw_link: str, parsed_link) -> Profile | None:
         existing = self._profile_store.find_by_url(raw_link)
@@ -1146,13 +1402,30 @@ class MainWindow(QMainWindow):
                 ensure_port_available(DEFAULT_LISTEN, int(self._api_port))
             self._process.start(self._validated_config_path)
         except AppError as exc:
-            self.diagnostics_widget.set_hint(exc.user_message)
+            safe_detail = sanitize_sensitive_text(exc.user_message)
+            self._record_latest_error(
+                ERROR_SOURCE_XRAY_STARTUP,
+                "Xray could not be started.",
+                details=safe_detail,
+                reason_code=type(exc).__name__,
+            )
+            self.diagnostics_widget.set_hint(safe_detail)
             return
         except Exception as exc:  # pragma: no cover - defensive
-            logger.exception("Start failed")
-            self.diagnostics_widget.set_hint(f"Start failed: {exc}")
+            safe_detail = sanitize_sensitive_text(str(exc))
+            logger.error("Start failed: %s", safe_detail)
+            self._record_latest_error(
+                ERROR_SOURCE_XRAY_STARTUP,
+                "Xray could not be started.",
+                details=safe_detail,
+                reason_code="unexpected-startup-error",
+            )
+            self.diagnostics_widget.set_hint(f"Start failed: {safe_detail}")
             return
 
+        self._clear_latest_error(ERROR_SOURCE_XRAY_STARTUP)
+        self._clear_latest_error(ERROR_SOURCE_XRAY_RUNTIME)
+        self._expected_core_stop = False
         self.status_label.setText("RUNNING")
         self.start_stop_button.setText("Stop")
         self.start_stop_button.setProperty("variant", "danger")
@@ -1245,6 +1518,14 @@ class MainWindow(QMainWindow):
             hint = f"Core stopped{suffix}. Logs: {self._process.stdout_path}"
         if proxy_note:
             hint = f"{hint} {proxy_note}"
+        if not self._expected_core_stop:
+            self._record_latest_error(
+                ERROR_SOURCE_XRAY_RUNTIME,
+                "Xray stopped unexpectedly.",
+                details=f"The local Xray process exited{suffix}.",
+                reason_code="unexpected-core-exit",
+            )
+        self._expected_core_stop = True
         self.diagnostics_widget.set_hint(hint)
         self._update_diagnostics_runtime_state()
 
@@ -1260,6 +1541,7 @@ class MainWindow(QMainWindow):
         self._stats_in_flight = False
         final_stats = self._last_known_stats()
         cancel_active_stats_queries(timeout_s=1.0)
+        self._expected_core_stop = True
         try:
             self._process.stop()
         except Exception:  # pragma: no cover - defensive
@@ -1287,6 +1569,7 @@ class MainWindow(QMainWindow):
             self.diagnostics_widget.set_hint(f"{user_message} {proxy_note}")
         else:
             self.diagnostics_widget.set_hint(user_message)
+        self._clear_latest_error(ERROR_SOURCE_XRAY_RUNTIME)
         self._update_diagnostics_runtime_state()
 
     def _load_profile(self) -> dict:
@@ -1325,12 +1608,21 @@ class MainWindow(QMainWindow):
     def _load_saved_profiles(self, profile_data: dict) -> None:
         self._profile_store.load()
         if self._profile_store.last_load_error:
+            safe_detail = sanitize_sensitive_text(self._profile_store.last_load_error)
+            self._record_latest_error(
+                ERROR_SOURCE_PROFILE_IMPORT,
+                "Saved profiles could not be loaded completely.",
+                details=safe_detail,
+                reason_code="profile-store-load-failed",
+            )
             QMessageBox.warning(
                 self,
                 "Saved Profiles Error",
-                self._profile_store.last_load_error,
+                safe_detail,
             )
-            self.diagnostics_widget.set_hint(self._profile_store.last_load_error)
+            self.diagnostics_widget.set_hint(safe_detail)
+        else:
+            self._clear_latest_error(ERROR_SOURCE_PROFILE_IMPORT)
 
         self._migrate_legacy_link(profile_data)
         self._refresh_profile_selector(select_profile_id=self._profile_store.default_profile_id)
@@ -1693,10 +1985,18 @@ class MainWindow(QMainWindow):
                 http_port=int(self._http_port),
             )
             self._last_traffic_store_error = None
+            self._clear_latest_error(ERROR_SOURCE_TRAFFIC_STORE)
             self.traffic_monitor_widget.set_current_session(self._traffic_session_id)
         except Exception as exc:  # pragma: no cover - defensive persistence guard
-            logger.exception("Failed to start traffic session")
-            self._last_traffic_store_error = str(exc)
+            safe_detail = sanitize_sensitive_text(str(exc))
+            logger.error("Failed to start traffic session: %s", safe_detail)
+            self._last_traffic_store_error = safe_detail
+            self._record_latest_error(
+                ERROR_SOURCE_TRAFFIC_STORE,
+                "Traffic history session could not be started.",
+                details=safe_detail,
+                reason_code="database-session-start-failed",
+            )
         self._refresh_traffic_monitor()
 
     def _record_traffic_sample(self, stats: TrafficStats) -> ProxyTrafficSample | None:
@@ -1747,8 +2047,27 @@ class MainWindow(QMainWindow):
             return
         if not worker.submit_sample(session_id, stats):
             self._last_traffic_store_error = "Traffic persistence queue is full; latest counters will be retried."
+            self._record_latest_error(
+                ERROR_SOURCE_TRAFFIC_STORE,
+                "Traffic history persistence is delayed.",
+                details=self._last_traffic_store_error,
+                reason_code="database-queue-full",
+            )
             return
-        self._last_traffic_store_error = worker.last_error
+        self._last_traffic_store_error = (
+            sanitize_sensitive_text(worker.last_error)
+            if worker.last_error is not None
+            else None
+        )
+        if self._last_traffic_store_error is not None:
+            self._record_latest_error(
+                ERROR_SOURCE_TRAFFIC_STORE,
+                "Traffic history could not be saved.",
+                details=self._last_traffic_store_error,
+                reason_code="database-write-failed",
+            )
+        else:
+            self._clear_latest_error(ERROR_SOURCE_TRAFFIC_STORE)
 
     def _end_traffic_session(self, *, final_stats: TrafficStats | None = None) -> None:
         session_id = self._traffic_session_id
@@ -1762,11 +2081,21 @@ class MainWindow(QMainWindow):
                         timeout_s=TRAFFIC_FINAL_FLUSH_TIMEOUT_S,
                     )
                 if not persisted:
-                    self._traffic_store.end_proxy_session(session_id, final_stats=final_stats)
+                    self._traffic_store.end_proxy_session(
+                        session_id, final_stats=final_stats
+                    )
                 self._last_traffic_store_error = None
+                self._clear_latest_error(ERROR_SOURCE_TRAFFIC_STORE)
             except Exception as exc:  # pragma: no cover - defensive persistence guard
-                logger.exception("Failed to end traffic session")
-                self._last_traffic_store_error = str(exc)
+                safe_detail = sanitize_sensitive_text(str(exc))
+                logger.error("Failed to end traffic session: %s", safe_detail)
+                self._last_traffic_store_error = safe_detail
+                self._record_latest_error(
+                    ERROR_SOURCE_TRAFFIC_STORE,
+                    "Traffic history session could not be finalized.",
+                    details=safe_detail,
+                    reason_code="database-session-end-failed",
+                )
         self._traffic_session_id = None
         self._last_traffic_sample = None
         self._pending_traffic_stats = None
@@ -1789,8 +2118,9 @@ class MainWindow(QMainWindow):
         elif not self._stats_available:
             warning = self._last_stats_query_result
         worker_error = (
-            self._traffic_storage_worker.last_error
+            sanitize_sensitive_text(self._traffic_storage_worker.last_error)
             if self._traffic_storage_worker is not None
+            and self._traffic_storage_worker.last_error is not None
             else None
         )
         self.traffic_monitor_widget.set_diagnostics(
@@ -1849,7 +2179,9 @@ class MainWindow(QMainWindow):
         if not isinstance(settings, TrafficSettings):
             return
         self._traffic_settings = settings
-        self._netmon_client = NetmonClient(provider=settings.netmon_provider)
+        self._netmon_client = NetmonClient(
+            provider=self._effective_netmon_provider(settings)
+        )
         if settings.app_tracking_enabled:
             self._netmon_client.start_tracking()
         else:
@@ -1861,6 +2193,13 @@ class MainWindow(QMainWindow):
                 force=True,
             )
         self._update_diagnostics_runtime_state()
+
+    @staticmethod
+    def _effective_netmon_provider(settings: TrafficSettings) -> str:
+        """Avoid touching the optional helper while app tracking is disabled."""
+        if not settings.app_tracking_enabled:
+            return "disabled"
+        return settings.netmon_provider
 
     def _tcp_reachable(self, host: str, port: int, *, timeout_s: float = 0.25) -> bool:
         try:
@@ -1916,6 +2255,7 @@ class MainWindow(QMainWindow):
         )
         monitor_metrics = self.traffic_monitor_widget.performance_snapshot()
         stats_completed = self._stats_queries_completed
+        recent_error = self._latest_error_state()
 
         desired = self._proxy_status_to_dict(audit.desired if audit is not None else None)
         actual = self._proxy_status_to_dict(audit.actual if audit is not None else None)
@@ -1935,6 +2275,7 @@ class MainWindow(QMainWindow):
             }
 
         state = {
+            "recent_error": recent_error,
             "system_proxy": {
                 "enabled_preference": bool(self.system_proxy_checkbox.isChecked()),
                 "supported": bool(self._system_proxy.is_supported()),
@@ -2010,14 +2351,19 @@ class MainWindow(QMainWindow):
                     else 0
                 ),
                 "persistence_worker_error": (
-                    self._traffic_storage_worker.last_error
+                    sanitize_sensitive_text(self._traffic_storage_worker.last_error)
                     if self._traffic_storage_worker is not None
+                    and self._traffic_storage_worker.last_error is not None
                     else None
                 ),
                 "last_retention_cleanup_at": cleanup.completed_at if cleanup is not None else None,
                 "last_retention_cleanup_duration_ms": cleanup.duration_ms if cleanup is not None else None,
                 "last_retention_cleanup_rows_removed": cleanup.rows_removed if cleanup is not None else None,
-                "last_retention_cleanup_error": cleanup.error if cleanup is not None else None,
+                "last_retention_cleanup_error": (
+                    sanitize_sensitive_text(cleanup.error)
+                    if cleanup is not None and cleanup.error is not None
+                    else None
+                ),
                 "proxy_history_enabled": bool(self._traffic_settings.proxy_history_enabled),
                 "app_tracking_enabled": bool(self._traffic_settings.app_tracking_enabled),
                 "detailed_retention_days": int(self._traffic_settings.detailed_retention_days),
@@ -2093,7 +2439,11 @@ class MainWindow(QMainWindow):
             try:
                 netmon_state: dict[str, object] = asdict(self._netmon_client.get_status())
             except Exception as exc:  # pragma: no cover - defensive diagnostics guard
-                netmon_state = {"last_error": str(exc)}
+                netmon_state = {
+                    "reason_code": "diagnostics-query-failed",
+                    "message": "The local netmon helper status could not be collected.",
+                    "last_error": sanitize_sensitive_text(str(exc)),
+                }
             storage_state: dict[str, object] = {}
             if store is not None:
                 try:
@@ -2113,7 +2463,7 @@ class MainWindow(QMainWindow):
                         ),
                     }
                 except Exception as exc:  # pragma: no cover - diagnostics remain usable
-                    storage_state = {"error": str(exc)}
+                    storage_state = {"error": sanitize_sensitive_text(str(exc))}
             return token, listener_state, netmon_state, storage_state
 
         worker = HealthCheckWorker(_run)
@@ -2131,6 +2481,18 @@ class MainWindow(QMainWindow):
         self._cached_listener_reachability = listener_state
         self._cached_netmon_diagnostics = netmon_state
         self._cached_storage_diagnostics = storage_state
+        self._sync_netmon_latest_error(netmon_state)
+        storage_error = storage_state.get("error")
+        if storage_error:
+            self._record_latest_error(
+                ERROR_SOURCE_DIAGNOSTICS,
+                "Runtime diagnostics could not be collected completely.",
+                details=str(storage_error),
+                reason_code="storage-diagnostics-failed",
+                severity="warning",
+            )
+        else:
+            self._clear_latest_error(ERROR_SOURCE_DIAGNOSTICS)
         self._update_diagnostics_runtime_state()
         if self.runtime_tabs.currentWidget() is self.diagnostics_widget:
             self.diagnostics_widget.refresh()
@@ -2139,7 +2501,14 @@ class MainWindow(QMainWindow):
         if self._closing or token != self._runtime_diagnostics_token:
             return
         self._runtime_diagnostics_in_flight = False
-        self._cached_storage_diagnostics = {"error": message}
+        safe_detail = sanitize_sensitive_text(message)
+        self._cached_storage_diagnostics = {"error": safe_detail}
+        self._record_latest_error(
+            ERROR_SOURCE_DIAGNOSTICS,
+            "Runtime diagnostics collection failed.",
+            details=safe_detail,
+            reason_code="diagnostics-worker-failed",
+        )
         self._update_diagnostics_runtime_state()
 
     def _audit_system_proxy_runtime(self) -> None:
@@ -2199,6 +2568,7 @@ class MainWindow(QMainWindow):
         self._last_proxy_audit_error = None
         drift_reason = str(detail)
         if reconciled:
+            self._clear_latest_error(ERROR_SOURCE_SYSTEM_PROXY)
             self._proxy_audit_failures = 0
             self._next_proxy_reconcile_at = 0.0
             self._last_proxy_reapply_at = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -2213,6 +2583,7 @@ class MainWindow(QMainWindow):
                 f"System proxy drift detected; retrying auto-reapply in {wait_s:.1f}s."
             )
         else:
+            self._clear_latest_error(ERROR_SOURCE_SYSTEM_PROXY)
             self._proxy_audit_failures = 0
             self._next_proxy_reconcile_at = 0.0
 
@@ -2225,7 +2596,8 @@ class MainWindow(QMainWindow):
             self._handle_proxy_audit_error(message, expected=False, now=time.monotonic())
 
     def _handle_proxy_audit_error(self, message: str, *, expected: bool, now: float) -> None:
-        self._last_proxy_audit_error = message
+        safe_detail = sanitize_sensitive_text(message)
+        self._last_proxy_audit_error = safe_detail
         self._proxy_audit_failures += 1
         backoff = min(PROXY_AUDIT_MAX_BACKOFF_S, float(2 ** min(self._proxy_audit_failures, 5)))
         self._next_proxy_reconcile_at = now + backoff
@@ -2233,9 +2605,16 @@ class MainWindow(QMainWindow):
             "System proxy audit failed (attempt %s, backoff %.1fs): %s",
             self._proxy_audit_failures,
             backoff,
-            message,
+            safe_detail,
         )
-        suffix = message if expected else "an unexpected error"
+        self._record_latest_error(
+            ERROR_SOURCE_SYSTEM_PROXY,
+            "System proxy reconciliation failed.",
+            details=safe_detail,
+            reason_code="proxy-audit-failed",
+            severity="warning",
+        )
+        suffix = safe_detail if expected else "an unexpected error"
         self.diagnostics_widget.set_hint(
             f"System proxy drift detected, but auto-reapply failed: {suffix}."
         )
@@ -2393,6 +2772,7 @@ class MainWindow(QMainWindow):
                 self._last_slow_stats_callback_warning_at = current
 
     def _on_stats_error(self, token: int, message: str, duration_ms: float = 0.0) -> None:
+        message = sanitize_sensitive_text(message)
         if token != self._stats_active_token:
             return
         self._stats_in_flight = False
@@ -2450,7 +2830,6 @@ class MainWindow(QMainWindow):
                 link.port,
                 security=link.security,
                 sni=link.sni,
-                allow_insecure=link.allow_insecure,
                 timeout_s=4.0,
             )
 
@@ -2477,7 +2856,7 @@ class MainWindow(QMainWindow):
             parts.append(f"TLS(host) {payload.tls_host_ms} ms")
         summary = ", ".join(parts) if parts else "No timing data"
         if payload.error:
-            summary = f"{summary}. {payload.error}"
+            summary = f"{summary}. {sanitize_sensitive_text(payload.error)}"
         self.diagnostics_widget.set_hint(f"Ping: {summary}")
 
     def _on_ping_error(self, message: str) -> None:
@@ -2518,7 +2897,9 @@ class MainWindow(QMainWindow):
             return
 
         if payload.error:
-            self.diagnostics_widget.set_hint(f"Speed test failed: {payload.error}")
+            self.diagnostics_widget.set_hint(
+                f"Speed test failed: {sanitize_sensitive_text(payload.error)}"
+            )
             return
 
         down = format_mbps(payload.download_bps or 0.0)
@@ -2535,15 +2916,21 @@ class MainWindow(QMainWindow):
     def _validation_warning(self, link) -> str | None:
         if getattr(link, "security", None) != "tls":
             return None
-        if bool(getattr(link, "allow_insecure", False)):
-            return None
+        legacy_allow_insecure = getattr(link, "legacy_allow_insecure", None)
+        if legacy_allow_insecure is True:
+            return (
+                "This profile uses the removed allowInsecure option. "
+                "v2link-client will use secure certificate verification instead. "
+                "If the connection fails, obtain an updated profile containing "
+                "pcs and/or vcn from your service provider."
+            )
 
         host = str(getattr(link, "host", "") or "")
         sni = getattr(link, "sni", None)
         if sni and host and sni != host:
             return (
                 "TLS SNI differs from host. Some servers present a certificate for the host even when SNI differs. "
-                "If connectivity fails, check logs and try setting `sni` to the host (or set allowInsecure=1 if you understand the risk)."
+                "If connectivity fails, check the provider's current secure TLS settings."
             )
         return None
 
@@ -2587,7 +2974,8 @@ class MainWindow(QMainWindow):
         ok_now = result.state == "online"
         if self._last_health_ok is True and not ok_now:
             self.diagnostics_widget.set_hint(
-                f"Connectivity went offline: {result.error or 'unknown error'}"
+                "Connectivity went offline: "
+                f"{sanitize_sensitive_text(result.error or 'unknown error')}"
             )
         self._last_health_ok = ok_now
 
@@ -2600,7 +2988,7 @@ class MainWindow(QMainWindow):
 
     def _set_health_state(self, state: str, detail: str) -> None:
         state = state.lower()
-        detail = detail.strip() or "—"
+        detail = sanitize_sensitive_text(detail).strip() or "—"
         self._health_state = state
         self._health_detail = detail
         detail_short = detail if len(detail) <= 60 else f"{detail[:57]}…"
@@ -2658,6 +3046,7 @@ class MainWindow(QMainWindow):
         audit_finished = getattr(self, "_proxy_audit_finished", None)
         if audit_finished is not None and not audit_finished.wait(PROXY_AUDIT_SHUTDOWN_WAIT_S):
             logger.warning("Proxy audit did not finish before shutdown restore timeout")
+        self._expected_core_stop = True
         try:
             self._process.stop(timeout_s=3.0)
         except Exception:  # pragma: no cover - defensive shutdown guard
@@ -2695,11 +3084,29 @@ class MainWindow(QMainWindow):
         try:
             status = self._system_proxy.apply(cfg)
         except AppError as exc:
-            self.diagnostics_widget.set_hint(f"Started, but failed to apply system proxy: {exc.user_message}")
+            safe_detail = sanitize_sensitive_text(exc.user_message)
+            self._record_latest_error(
+                ERROR_SOURCE_SYSTEM_PROXY,
+                "System proxy settings could not be applied.",
+                details=safe_detail,
+                reason_code=type(exc).__name__,
+            )
+            self.diagnostics_widget.set_hint(
+                f"Started, but failed to apply system proxy: {safe_detail}"
+            )
             return
         except Exception as exc:  # pragma: no cover - defensive
-            logger.exception("System proxy apply failed")
-            self.diagnostics_widget.set_hint(f"Started, but failed to apply system proxy: {exc}")
+            safe_detail = sanitize_sensitive_text(str(exc))
+            logger.error("System proxy apply failed: %s", safe_detail)
+            self._record_latest_error(
+                ERROR_SOURCE_SYSTEM_PROXY,
+                "System proxy settings could not be applied.",
+                details=safe_detail,
+                reason_code="unexpected-proxy-apply-error",
+            )
+            self.diagnostics_widget.set_hint(
+                f"Started, but failed to apply system proxy: {safe_detail}"
+            )
             return
 
         self._system_proxy_applied = True
@@ -2709,6 +3116,7 @@ class MainWindow(QMainWindow):
         self._last_proxy_reapply_at = None
         self._last_proxy_reapply_reason = None
         self._proxy_audit_failures = 0
+        self._clear_latest_error(ERROR_SOURCE_SYSTEM_PROXY)
         self._next_proxy_reconcile_at = 0.0
         self._proxy_audit_token += 1
         self._proxy_audit_timer.start()
@@ -2738,24 +3146,49 @@ class MainWindow(QMainWindow):
                     f"http={status.http_host}:{status.http_port}, "
                     f"socks={status.socks_host}:{status.socks_port}."
                 )
+                self._clear_latest_error(ERROR_SOURCE_SYSTEM_PROXY)
         except AppError as exc:
-            logger.exception("System proxy restore failed")
+            safe_detail = sanitize_sensitive_text(exc.user_message)
+            logger.error("System proxy restore failed: %s", safe_detail)
+            self._record_latest_error(
+                ERROR_SOURCE_SYSTEM_PROXY,
+                "System proxy settings could not be restored.",
+                details=safe_detail,
+                reason_code=type(exc).__name__,
+            )
             try:
                 status = self._system_proxy.force_no_proxy()
                 logger.warning("Applied no-proxy fallback after restore failure")
                 restore_note = (
-                    f"System proxy restore failed ({exc.user_message}); "
+                    f"System proxy restore failed ({safe_detail}); "
                     f"fallback applied: mode={status.mode}."
                 )
             except Exception as fallback_exc:
-                logger.exception("Failed to apply no-proxy fallback after restore failure")
+                safe_fallback = sanitize_sensitive_text(str(fallback_exc))
+                logger.error(
+                    "Failed to apply no-proxy fallback after restore failure: %s",
+                    safe_fallback,
+                )
+                self._record_latest_error(
+                    ERROR_SOURCE_SYSTEM_PROXY,
+                    "System proxy restore and safe fallback both failed.",
+                    details=f"{safe_detail}\nFallback: {safe_fallback}",
+                    reason_code="proxy-restore-fallback-failed",
+                )
                 restore_note = (
-                    f"System proxy restore failed ({exc.user_message}); "
-                    f"fallback also failed: {fallback_exc}."
+                    f"System proxy restore failed ({safe_detail}); "
+                    f"fallback also failed: {safe_fallback}."
                 )
         except Exception as exc:  # pragma: no cover - defensive
-            logger.exception("System proxy restore failed")
-            restore_note = f"System proxy restore failed: {exc}."
+            safe_detail = sanitize_sensitive_text(str(exc))
+            logger.error("System proxy restore failed: %s", safe_detail)
+            self._record_latest_error(
+                ERROR_SOURCE_SYSTEM_PROXY,
+                "System proxy settings could not be restored.",
+                details=safe_detail,
+                reason_code="unexpected-proxy-restore-error",
+            )
+            restore_note = f"System proxy restore failed: {safe_detail}."
         self._system_proxy_applied = False
         self._system_proxy_cfg = None
         self._last_proxy_audit = None

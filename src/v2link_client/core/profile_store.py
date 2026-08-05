@@ -15,8 +15,10 @@ from uuid import uuid4
 
 from v2link_client.core.link_parser import parse_link
 from v2link_client.core.storage import get_config_dir
+from v2link_client.core.xray_locator import XrayBinary
 
 PROFILES_SCHEMA_VERSION = 1
+XRAY_CONFIG_SCHEMA_REVISION = 2
 PROFILES_FILE = "profiles.json"
 KNOWN_PROTOCOLS = {"vmess", "vless", "trojan", "ss"}
 _URL_PREFIX_RE = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.-]*)://")
@@ -63,7 +65,13 @@ def connection_fingerprint(url: str) -> str | None:
             "transport": link.transport,
             "sni": link.sni,
             "fingerprint": link.fingerprint,
-            "allow_insecure": bool(link.allow_insecure),
+            "legacy_allow_insecure": link.legacy_allow_insecure,
+            "pinned_peer_cert_sha256": list(
+                getattr(link, "pinned_peer_cert_sha256", ()) or ()
+            ),
+            "verify_peer_cert_by_name": list(
+                getattr(link, "verify_peer_cert_by_name", ()) or ()
+            ),
             "header_type": link.header_type,
             "path": link.path,
             "ws_host": link.ws_host,
@@ -74,6 +82,51 @@ def connection_fingerprint(url: str) -> str | None:
     payload = json.dumps(
         payload_data,
         ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def xray_binary_identity(xray: XrayBinary) -> str:
+    """Return a stable, non-secret identity for the selected Xray executable."""
+    path = (xray.path or "").strip()
+    resolved_path = "unavailable"
+    stat_identity: dict[str, int] = {}
+    if path:
+        try:
+            candidate = Path(path).expanduser().resolve(strict=False)
+            resolved_path = str(candidate)
+            stat_result = candidate.stat()
+            stat_identity = {
+                "size": int(stat_result.st_size),
+                "mtime_ns": int(stat_result.st_mtime_ns),
+            }
+        except OSError:
+            resolved_path = str(Path(path).expanduser())
+    payload = json.dumps(
+        {
+            "path": resolved_path,
+            "version": (xray.version or "unavailable").strip() or "unavailable",
+            "valid": bool(xray.valid),
+            "stat": stat_identity,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def validation_fingerprint(url: str, xray_identity: str) -> str | None:
+    connection = connection_fingerprint(url)
+    if not connection:
+        return None
+    payload = json.dumps(
+        {
+            "connection": connection,
+            "xray_config_schema": XRAY_CONFIG_SCHEMA_REVISION,
+            "xray_binary": xray_identity or "unavailable",
+        },
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -120,7 +173,7 @@ class Profile:
         )
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Profile" | None:
+    def from_dict(cls, data: dict[str, Any], *, xray_identity: str = "unavailable") -> "Profile" | None:
         try:
             profile_id = str(data.get("id", "")).strip()
             name = str(data.get("name", "")).strip()
@@ -138,7 +191,7 @@ class Profile:
                 None if validated_at_raw in {None, ""} else str(validated_at_raw).strip()
             )
             validation_fingerprint_raw = data.get("validation_fingerprint")
-            validation_fingerprint = (
+            stored_validation_fingerprint = (
                 None
                 if validation_fingerprint_raw in {None, ""}
                 else str(validation_fingerprint_raw).strip()
@@ -157,16 +210,16 @@ class Profile:
         if protocol not in KNOWN_PROTOCOLS:
             protocol = "unknown"
 
-        current_fingerprint = connection_fingerprint(url)
+        current_fingerprint = validation_fingerprint(url, xray_identity)
         if (
             not validated
-            or not validation_fingerprint
+            or not stored_validation_fingerprint
             or not current_fingerprint
-            or validation_fingerprint != current_fingerprint
+            or stored_validation_fingerprint != current_fingerprint
         ):
             validated = False
             validated_at = None
-            validation_fingerprint = None
+            stored_validation_fingerprint = None
 
         return cls(
             id=profile_id,
@@ -180,7 +233,7 @@ class Profile:
             notes=notes,
             validated=validated,
             validated_at=validated_at,
-            validation_fingerprint=validation_fingerprint,
+            validation_fingerprint=stored_validation_fingerprint,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -201,12 +254,13 @@ class Profile:
 
 
 class ProfileStore:
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(self, path: Path | None = None, *, xray_identity: str = "unavailable") -> None:
         self.path = path or (get_config_dir() / PROFILES_FILE)
         self.schema_version = PROFILES_SCHEMA_VERSION
         self.default_profile_id: str | None = None
         self.profiles: list[Profile] = []
         self.last_load_error: str | None = None
+        self.xray_identity = xray_identity or "unavailable"
 
     def load(self) -> None:
         self.last_load_error = None
@@ -260,7 +314,7 @@ class ProfileStore:
             for item in raw_profiles:
                 if not isinstance(item, dict):
                     continue
-                parsed = Profile.from_dict(item)
+                parsed = Profile.from_dict(item, xray_identity=self.xray_identity)
                 if parsed is not None:
                     parsed_profiles.append(parsed)
 
@@ -294,20 +348,23 @@ class ProfileStore:
                 prior_fingerprint = connection_fingerprint(current.url)
                 next_fingerprint = connection_fingerprint(cleaned_url)
                 connection_changed = prior_fingerprint != next_fingerprint
+                next_validation_fingerprint = validation_fingerprint(
+                    cleaned_url, self.xray_identity
+                )
 
                 validated = (
                     current.validated
                     and current.validation_fingerprint is not None
-                    and current.validation_fingerprint == next_fingerprint
+                    and current.validation_fingerprint == next_validation_fingerprint
                 )
                 validated_at = current.validated_at if validated else None
-                validation_fingerprint = (
+                stored_validation_fingerprint = (
                     current.validation_fingerprint if validated else None
                 )
                 if connection_changed:
                     validated = False
                     validated_at = None
-                    validation_fingerprint = None
+                    stored_validation_fingerprint = None
 
                 updated = replace(
                     profile,
@@ -318,7 +375,7 @@ class ProfileStore:
                     updated_at=_now_iso(),
                     validated=validated,
                     validated_at=validated_at,
-                    validation_fingerprint=validation_fingerprint,
+                    validation_fingerprint=stored_validation_fingerprint,
                 )
                 self.profiles[idx] = updated
                 self.save()
@@ -369,7 +426,7 @@ class ProfileStore:
         self.update_profile(updated)
 
     def is_profile_validation_current(self, profile: Profile) -> bool:
-        current_fingerprint = connection_fingerprint(profile.url)
+        current_fingerprint = validation_fingerprint(profile.url, self.xray_identity)
         return bool(
             profile.validated
             and profile.validation_fingerprint
@@ -377,12 +434,16 @@ class ProfileStore:
             and profile.validation_fingerprint == current_fingerprint
         )
 
+    def set_xray_identity(self, identity: str) -> None:
+        """Select the Xray identity used for subsequent validation decisions."""
+        self.xray_identity = identity or "unavailable"
+
     def mark_profile_validated(self, profile_id: str) -> Profile | None:
         current = self.get_by_id(profile_id)
         if current is None:
             return None
 
-        fingerprint = connection_fingerprint(current.url)
+        fingerprint = validation_fingerprint(current.url, self.xray_identity)
         if not fingerprint:
             return None
 

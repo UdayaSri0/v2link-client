@@ -8,6 +8,7 @@ import threading
 import time
 from typing import Any
 
+from v2link_client.core.logging_setup import sanitize_sensitive_text
 from v2link_client.core.traffic_store import RetentionCleanupResult, TrafficStore
 from v2link_client.core.xray_api import TrafficStats
 
@@ -202,11 +203,15 @@ class TrafficStorageWorker:
                     )
                     with self._lock:
                         self._last_cleanup = result
-                        self._last_error = result.error
+                        self._last_error = (
+                            sanitize_sensitive_text(result.error)
+                            if result.error is not None
+                            else None
+                        )
                     command.result["ok"] = result.error is None
             except Exception as exc:  # persistence must recover on the next cumulative sample
                 with self._lock:
-                    self._last_error = str(exc)
+                    self._last_error = sanitize_sensitive_text(str(exc))
                     self._write_failures += 1
                     if command.session_id is not None:
                         self._last_submitted.pop(command.session_id, None)

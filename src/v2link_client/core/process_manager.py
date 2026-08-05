@@ -8,10 +8,12 @@ The UI intentionally keeps policy decisions simple:
 
 from __future__ import annotations
 
+import codecs
 import errno
 import logging
 import os
 from pathlib import Path
+import re
 import socket
 import subprocess
 import threading
@@ -23,6 +25,7 @@ from v2link_client.core.errors import (
     PortInUseError,
 )
 from v2link_client.core.storage import get_logs_dir
+from v2link_client.core.logging_setup import sanitize_sensitive_text
 from v2link_client.core.owned_process import terminate_owned_process
 from v2link_client.core.system_subprocess import build_xray_subprocess_env
 from v2link_client.core.xray_locator import (
@@ -35,6 +38,13 @@ logger = logging.getLogger(__name__)
 
 XRAY_STDOUT_MAX_BYTES = 2 * 1024 * 1024
 XRAY_STDOUT_BACKUP_COUNT = 2
+
+_PEM_BEGIN_LINE = re.compile(
+    r"-----BEGIN (?:[A-Z0-9 ]+ )?(?:CERTIFICATE|PRIVATE KEY)-----"
+)
+_PEM_END_LINE = re.compile(
+    r"-----END (?:[A-Z0-9 ]+ )?(?:CERTIFICATE|PRIVATE KEY)-----"
+)
 
 
 CoreBinary = XrayBinary
@@ -83,9 +93,10 @@ def validate_xray_config(xray: CoreBinary, config_path: Path, *, timeout_s: floa
         )
     cmd = [xray.path, "run", "-test", "-c", str(config_path)]
     env, env_info = build_xray_subprocess_env(xray.path)
+    safe_cmd = sanitize_sensitive_text(" ".join(cmd))
     logger.info(
         "Validating xray config: %s [env_mode=%s removed_env=%s]",
-        cmd,
+        safe_cmd,
         env_info.mode,
         ",".join(env_info.removed_keys) or "none",
     )
@@ -99,14 +110,21 @@ def validate_xray_config(xray: CoreBinary, config_path: Path, *, timeout_s: floa
             env=env,
         )
     except FileNotFoundError as exc:
+        safe_path = sanitize_sensitive_text(xray.path)
         raise BinaryMissingError(
-            f"{xray.name} binary missing: {xray.path}",
-            user_message=f"{xray.name} binary not found: {xray.path}",
+            f"{xray.name} binary missing: {safe_path}",
+            user_message=f"{xray.name} binary not found: {safe_path}",
         ) from exc
     except PermissionError as exc:
+        safe_path = sanitize_sensitive_text(xray.path)
         raise PermissionDeniedError(
-            f"{xray.name} not executable: {xray.path}",
-            user_message=f"{xray.name} binary is not executable: {xray.path}",
+            f"{xray.name} not executable: {safe_path}",
+            user_message=f"{xray.name} binary is not executable: {safe_path}",
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ConfigBuildError(
+            "xray config validation timed out",
+            user_message="Xray configuration validation timed out.",
         ) from exc
 
     if result.returncode == 0:
@@ -114,7 +132,9 @@ def validate_xray_config(xray: CoreBinary, config_path: Path, *, timeout_s: floa
 
     stderr = (result.stderr or "").strip()
     stdout = (result.stdout or "").strip()
-    detail = stderr or stdout or f"exit code {result.returncode}"
+    detail = sanitize_sensitive_text(
+        stderr or stdout or f"exit code {result.returncode}"
+    )
 
     raise ConfigBuildError(
         f"xray config validation failed: {detail}",
@@ -245,19 +265,63 @@ def _pump_bounded_stdout(proc: subprocess.Popen[bytes], path: Path) -> None:
     stream = proc.stdout
     if stream is None:
         return
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    pending = ""
+    inside_pem = False
     try:
         while True:
             chunk = stream.read1(64 * 1024)
             if not chunk:
+                pending += decoder.decode(b"", final=True)
+                pending = _bound_pending_output(pending)
+                if pending:
+                    _, safe_text = _sanitize_xray_output_line(
+                        pending, inside_pem=inside_pem
+                    )
+                    if safe_text:
+                        _append_bounded(path, safe_text.encode("utf-8"))
                 return
-            _append_bounded(path, chunk)
+            pending += decoder.decode(chunk)
+            while "\n" in pending:
+                line, pending = pending.split("\n", 1)
+                inside_pem, safe_text = _sanitize_xray_output_line(
+                    f"{line}\n", inside_pem=inside_pem
+                )
+                if safe_text:
+                    _append_bounded(path, safe_text.encode("utf-8"))
+            pending = _bound_pending_output(pending)
     except (OSError, ValueError):
         logger.debug("Xray stdout stream closed during shutdown", exc_info=True)
 
 
+def _sanitize_xray_output_line(line: str, *, inside_pem: bool) -> tuple[bool, str]:
+    """Sanitize one complete Xray output line before it reaches persistent logs."""
+    if inside_pem:
+        return (not bool(_PEM_END_LINE.search(line))), ""
+    if _PEM_BEGIN_LINE.search(line):
+        return (not bool(_PEM_END_LINE.search(line))), "<redacted>\n"
+    return False, sanitize_sensitive_text(line)
+
+
+def _bound_pending_output(text: str) -> str:
+    """Bound an unterminated output line without leaving malformed UTF-8."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= XRAY_STDOUT_MAX_BYTES:
+        return text
+    return encoded[-XRAY_STDOUT_MAX_BYTES :].decode("utf-8", errors="ignore")
+
+
 def _append_bounded(path: Path, chunk: bytes) -> None:
+    # Keep this final write boundary defensive even when a caller other than
+    # the managed stream pump supplies bytes directly.
+    safe_text = sanitize_sensitive_text(chunk.decode("utf-8", errors="replace"))
+    chunk = safe_text.encode("utf-8")
     if len(chunk) > XRAY_STDOUT_MAX_BYTES:
-        chunk = chunk[-XRAY_STDOUT_MAX_BYTES :]
+        chunk = (
+            chunk[-XRAY_STDOUT_MAX_BYTES :]
+            .decode("utf-8", errors="ignore")
+            .encode("utf-8")
+        )
     current_size = path.stat().st_size if path.exists() else 0
     if current_size + len(chunk) > XRAY_STDOUT_MAX_BYTES:
         _rotate_log(path)

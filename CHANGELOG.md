@@ -2,13 +2,34 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [0.2.4] - 2026-08-05
 
 ### Added
 
+- Added strict support for provider-supplied `pcs` / `pinnedPeerCertSha256` certificate pins and `vcn` / `verifyPeerCertByName` verification names.
+- Added structured netmon installation, daemon and backend states so helper availability is reported accurately.
+- Added sanitized Copy diagnostics, Copy latest error, profile-validation error copy, helper-diagnostics copy and UTF-8 diagnostics report saving.
+
 ### Changed
 
+- Migrated legacy VLESS `allowInsecure` imports to normal secure certificate verification with a compatibility warning; the application never fabricates certificate pins.
+- AppImage now identifies that per-application attribution requires a separately installed helper, while normal proxy operation remains independent of netmon.
+- The placeholder netmon backend is accurately labelled non-operational and returns no fabricated application counters.
+- Reworked diagnostics actions into an accessible, responsive layout and added category-aware latest-error tracking so successful recovery clears the corresponding stale error.
+
 ### Fixed
+
+- Stopped generating the Xray-core 26.3.27-removed `allowInsecure` field and invalidated stale validation state when the generated schema or selected Xray identity changes.
+- Corrected installed-but-inactive netmon helpers being reported as not installed.
+- Corrected Debian helper lifecycle and extracted-artifact verification gaps without enabling or initially starting the opt-in service.
+- Closed diagnostic and error-copy privacy gaps by sanitizing sensitive values before display, clipboard placement, report saving and ordinary logging.
+
+### Security
+
+- Kept normal TLS certificate verification enabled when migrating legacy profiles; insecure verification bypass and boolean-to-pin conversion are not supported.
+- Sanitized Xray, helper and runtime errors through a shared privacy boundary while preserving useful technical context.
+- Restricted the optional helper to a dedicated locked account, a group-only Unix socket and a capability-free systemd sandbox while its production eBPF backend remains deferred.
+- Enabled privacy redaction by default for diagnostics shown in the UI, copied to the clipboard, saved to disk or written to application logs.
 
 ## [0.2.3] - 2026-07-29
 

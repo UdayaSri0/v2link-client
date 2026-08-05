@@ -7,13 +7,18 @@ V2Ray/Xray ecosystems and are the minimal requirement to start the core.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 import uuid
 from typing import Literal
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qsl, unquote, urlparse
 
 from v2link_client.core.errors import InvalidLinkError, UnsupportedSchemeError
 
 SUPPORTED_SCHEMES: set[str] = {"vmess", "vless", "trojan", "ss"}
+MAX_TLS_QUERY_VALUE_LENGTH = 4096
+MAX_CERTIFICATE_PINS = 16
+MAX_VERIFICATION_NAMES = 32
+MAX_VERIFICATION_NAME_LENGTH = 253
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,13 +33,15 @@ class VlessLink:
     transport: str
     sni: str | None
     fingerprint: str | None
-    allow_insecure: bool
+    legacy_allow_insecure: bool | None
     header_type: str | None
     path: str | None
     ws_host: str | None
     grpc_service_name: str | None
     flow: str | None
     alpn: list[str] | None
+    pinned_peer_cert_sha256: tuple[str, ...] | None
+    verify_peer_cert_by_name: tuple[str, ...] | None
 
     def display_name(self) -> str:
         return self.name or f"{self.host}:{self.port}"
@@ -60,6 +67,100 @@ def _parse_bool(value: str | None) -> bool | None:
     if normalized in {"0", "false", "no", "n", "off"}:
         return False
     return None
+
+
+def _parse_certificate_pins(values: list[str]) -> tuple[str, ...] | None:
+    if not values:
+        return None
+    if sum(len(value) for value in values) > MAX_TLS_QUERY_VALUE_LENGTH:
+        raise InvalidLinkError(
+            "Certificate pin input exceeds the supported limit",
+            user_message="The profile's certificate pin data is too long.",
+        )
+
+    result: list[str] = []
+    seen: set[str] = set()
+    entry_count = 0
+    for value in values:
+        for item in value.split(","):
+            entry_count += 1
+            if entry_count > MAX_CERTIFICATE_PINS:
+                raise InvalidLinkError(
+                    "Certificate pin count exceeds the supported limit",
+                    user_message="The profile contains too many certificate pins.",
+                )
+            candidate = item.strip()
+            if not candidate:
+                raise InvalidLinkError(
+                    "Certificate pin list contains an empty entry",
+                    user_message="The profile contains an empty certificate pin.",
+                )
+            colon_hex = r"[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){31}"
+            if ":" in candidate and re.fullmatch(colon_hex, candidate) is None:
+                raise InvalidLinkError(
+                    "Certificate pin has invalid colon-separated hexadecimal syntax",
+                    user_message="A certificate pin has an invalid hexadecimal format.",
+                )
+            candidate = candidate.replace(":", "")
+            if len(candidate) != 64:
+                raise InvalidLinkError(
+                    "Certificate pin has an invalid SHA-256 length",
+                    user_message="A certificate pin must be a 32-byte SHA-256 value.",
+                )
+            try:
+                bytes.fromhex(candidate)
+            except ValueError as exc:
+                raise InvalidLinkError(
+                    "Certificate pin contains non-hexadecimal characters",
+                    user_message="A certificate pin must contain only hexadecimal characters.",
+                ) from exc
+            normalized = candidate.lower()
+            if normalized not in seen:
+                seen.add(normalized)
+                result.append(normalized)
+    return tuple(result)
+
+
+def _parse_verification_names(values: list[str]) -> tuple[str, ...] | None:
+    if not values:
+        return None
+    if sum(len(value) for value in values) > MAX_TLS_QUERY_VALUE_LENGTH:
+        raise InvalidLinkError(
+            "Certificate verification-name input exceeds the supported limit",
+            user_message="The profile's certificate verification-name data is too long.",
+        )
+
+    result: list[str] = []
+    seen: set[str] = set()
+    entry_count = 0
+    for value in values:
+        for item in value.split(","):
+            entry_count += 1
+            if entry_count > MAX_VERIFICATION_NAMES:
+                raise InvalidLinkError(
+                    "Certificate verification-name count exceeds the supported limit",
+                    user_message="The profile contains too many certificate verification names.",
+                )
+            candidate = item.strip()
+            if not candidate:
+                raise InvalidLinkError(
+                    "Certificate verification-name list contains an empty entry",
+                    user_message="The profile contains an empty certificate verification name.",
+                )
+            if len(candidate) > MAX_VERIFICATION_NAME_LENGTH:
+                raise InvalidLinkError(
+                    "Certificate verification name exceeds the supported limit",
+                    user_message="A certificate verification name is too long.",
+                )
+            if any(ord(character) < 32 or ord(character) == 127 for character in candidate):
+                raise InvalidLinkError(
+                    "Certificate verification name contains a control character",
+                    user_message="A certificate verification name contains an invalid character.",
+                )
+            if candidate not in seen:
+                seen.add(candidate)
+                result.append(candidate)
+    return tuple(result)
 
 
 def parse_link(raw: str) -> ParsedLink:
@@ -104,16 +205,30 @@ def _parse_vless(raw: str) -> VlessLink:
             user_message="VLESS user id must be a UUID.",
         ) from exc
 
-    query_raw = parse_qs(parsed.query, keep_blank_values=True)
-    query = {k.lower(): v for k, v in query_raw.items()}
+    query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    query: dict[str, list[str]] = {}
+    for key, value in query_pairs:
+        query.setdefault(key.lower(), []).append(value)
 
     encryption = _first(query, "encryption") or "none"
     security = _first(query, "security") or "none"
     transport = _first(query, "type") or _first(query, "transport") or "tcp"
 
-    allow_insecure = _parse_bool(_first(query, "allowinsecure"))
-    if allow_insecure is None:
-        allow_insecure = False
+    legacy_allow_insecure = _parse_bool(_first(query, "allowinsecure"))
+    pinned_peer_cert_sha256 = _parse_certificate_pins(
+        [
+            value
+            for key, value in query_pairs
+            if key.lower() in {"pcs", "pinnedpeercertsha256"}
+        ]
+    )
+    verify_peer_cert_by_name = _parse_verification_names(
+        [
+            value
+            for key, value in query_pairs
+            if key.lower() in {"vcn", "verifypeercertbyname"}
+        ]
+    )
 
     sni = _first(query, "sni") or _first(query, "servername")
     fingerprint = _first(query, "fp") or _first(query, "fingerprint")
@@ -157,11 +272,13 @@ def _parse_vless(raw: str) -> VlessLink:
         transport=transport,
         sni=sni,
         fingerprint=fingerprint,
-        allow_insecure=allow_insecure,
+        legacy_allow_insecure=legacy_allow_insecure,
         header_type=header_type,
         path=path,
         ws_host=ws_host,
         grpc_service_name=grpc_service_name,
         flow=flow,
         alpn=alpn,
+        pinned_peer_cert_sha256=pinned_peer_cert_sha256,
+        verify_peer_cert_by_name=verify_peer_cert_by_name,
     )

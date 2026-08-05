@@ -3,6 +3,10 @@ use anyhow::Result;
 #[derive(Debug, Clone)]
 pub struct BackendStatus {
     pub name: String,
+    pub state: String,
+    pub reason_code: String,
+    pub operational: bool,
+    pub counters_available: bool,
     pub permission_ok: bool,
     pub kernel_supported: bool,
     pub message: String,
@@ -23,18 +27,18 @@ pub struct Backend {
 
 impl Backend {
     pub fn load() -> Self {
-        let permission_ok = unsafe { libc::geteuid() == 0 };
-        let message = if permission_ok {
-            "Aya eBPF loader scaffold is present, but no production BPF program is bundled yet."
-        } else {
-            "v2link-netmon is not running with privileges required to load eBPF programs."
-        };
         Self {
             status: BackendStatus {
                 name: "ebpf-unavailable".to_string(),
-                permission_ok,
+                state: "not-implemented".to_string(),
+                reason_code: "backend-not-implemented".to_string(),
+                operational: false,
+                counters_available: false,
+                permission_ok: true,
                 kernel_supported: false,
-                message: message.to_string(),
+                message:
+                    "The production eBPF attribution backend is not implemented in this release."
+                        .to_string(),
             },
         }
     }
@@ -45,5 +49,21 @@ impl Backend {
 
     pub fn read_counters(&mut self) -> Result<Vec<PidCounter>> {
         Ok(Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn placeholder_backend_is_explicitly_non_operational() {
+        let mut backend = Backend::load();
+        let status = backend.status();
+        assert_eq!(status.reason_code, "backend-not-implemented");
+        assert_eq!(status.state, "not-implemented");
+        assert!(!status.operational);
+        assert!(!status.counters_available);
+        assert!(backend.read_counters().expect("read counters").is_empty());
     }
 }

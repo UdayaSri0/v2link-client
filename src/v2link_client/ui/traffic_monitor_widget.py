@@ -12,7 +12,6 @@ from PyQt6.QtCore import QObject, QRunnable, QDate, QThreadPool, Qt, QUrl, pyqtS
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QAbstractItemView,
-    QApplication,
     QCheckBox,
     QComboBox,
     QDateEdit,
@@ -41,6 +40,7 @@ from v2link_client.core.humanize import (
     format_speed,
     format_time_only,
 )
+from v2link_client.core.logging_setup import sanitize_sensitive_text
 from v2link_client.core.netmon_client import NetmonClient, NetmonStatus
 from v2link_client.core.traffic_settings import (
     TrafficSettings,
@@ -57,6 +57,7 @@ from v2link_client.core.traffic_store import (
     TrafficStore,
     TrafficUsageSummary,
 )
+from v2link_client.ui.safe_text_actions import copy_sanitized_text
 from v2link_client.ui.traffic_chart_widget import (
     MAX_SESSION_CHART_POINTS,
     TrafficBarChartWidget,
@@ -93,6 +94,11 @@ NOTICE_DETAILS_TEXT = (
 TRAFFIC_MONITOR_DOCS_URL = "https://github.com/UdayaSri0/v2link-client/blob/beta/docs/traffic-monitor.md"
 
 
+def _without_legacy_mock_rows(rows: list[AppUsageSummary]) -> list[AppUsageSummary]:
+    """Never surface application counters created by the retired mock provider."""
+    return [row for row in rows if row.source != "mock"]
+
+
 class TrafficTaskSignals(QObject):
     result = pyqtSignal(object)
     error = pyqtSignal(str)
@@ -108,7 +114,7 @@ class TrafficTaskWorker(QRunnable):
         try:
             result = self.fn()
         except Exception as exc:  # pragma: no cover - defensive worker boundary
-            self.signals.error.emit(str(exc))
+            self.signals.error.emit(sanitize_sensitive_text(str(exc)))
             return
         self.signals.result.emit(result)
 
@@ -499,31 +505,35 @@ class TrafficMonitorWidget(QWidget):
             self._populate_current_session_from_samples()
             self._populate_overview_recent_sessions()
         except Exception as exc:  # pragma: no cover - defensive UI guard
-            logger.exception("Failed to refresh traffic overview")
-            self.store_error_label.setText(str(exc))
+            safe_detail = sanitize_sensitive_text(exc)
+            logger.error("Failed to refresh traffic overview: %s", safe_detail)
+            self.store_error_label.setText(safe_detail)
 
     def refresh_applications(self) -> None:
         try:
             self._refresh_netmon_status()
             self._populate_applications()
         except Exception as exc:  # pragma: no cover - defensive UI guard
-            logger.exception("Failed to refresh traffic applications")
-            self.store_error_label.setText(str(exc))
+            safe_detail = sanitize_sensitive_text(exc)
+            logger.error("Failed to refresh traffic applications: %s", safe_detail)
+            self.store_error_label.setText(safe_detail)
 
     def refresh_profiles(self) -> None:
         try:
             self._populate_profiles()
         except Exception as exc:  # pragma: no cover - defensive UI guard
-            logger.exception("Failed to refresh traffic profiles")
-            self.store_error_label.setText(str(exc))
+            safe_detail = sanitize_sensitive_text(exc)
+            logger.error("Failed to refresh traffic profiles: %s", safe_detail)
+            self.store_error_label.setText(safe_detail)
 
     def refresh_history(self) -> None:
         started_at = time.monotonic()
         try:
             self._populate_history()
         except Exception as exc:  # pragma: no cover - defensive UI guard
-            logger.exception("Failed to refresh traffic history")
-            self.store_error_label.setText(str(exc))
+            safe_detail = sanitize_sensitive_text(exc)
+            logger.error("Failed to refresh traffic history: %s", safe_detail)
+            self.store_error_label.setText(safe_detail)
         finally:
             self._last_history_refresh_ms = (time.monotonic() - started_at) * 1000.0
 
@@ -542,8 +552,9 @@ class TrafficMonitorWidget(QWidget):
             self.app_tables_label.setText("yes" if self._store.app_tables_present() else "no")
             self._populate_history_diagnostics()
         except Exception as exc:  # pragma: no cover - defensive UI guard
-            logger.exception("Failed to refresh traffic diagnostics")
-            self.store_error_label.setText(str(exc))
+            safe_detail = sanitize_sensitive_text(exc)
+            logger.error("Failed to refresh traffic diagnostics: %s", safe_detail)
+            self.store_error_label.setText(safe_detail)
 
     def _build_overview_tab(self) -> QWidget:
         tab = QWidget()
@@ -1143,7 +1154,7 @@ class TrafficMonitorWidget(QWidget):
         if not hasattr(self, "apps_table"):
             return
         rows: list[AppUsageSummary] = []
-        if self._settings.app_tracking_enabled and self._netmon_status.running:
+        if self._settings.app_tracking_enabled and self._netmon_status.operational:
             live_rows = self._netmon_client.get_live_apps()
             if self._store is not None:
                 for row in live_rows:
@@ -1167,6 +1178,8 @@ class TrafficMonitorWidget(QWidget):
         elif self._store is not None:
             rows = self._store.get_today_app_usage()
 
+        rows = _without_legacy_mock_rows(rows)
+
         filter_text = self.app_filter_input.text().strip().lower() if hasattr(self, "app_filter_input") else ""
         if filter_text:
             rows = [
@@ -1182,17 +1195,25 @@ class TrafficMonitorWidget(QWidget):
         if hasattr(self, "app_search_row"):
             self.app_search_row.setVisible(bool(rows) or helper_available)
         if hasattr(self, "app_status_title_label"):
-            if not self._netmon_status.installed:
+            if self._netmon_status.installation_state == "external-helper-required":
+                self.app_status_title_label.setText("Per-application tracking requires a separate system helper")
+            elif not self._netmon_status.installed:
                 self.app_status_title_label.setText("Per-application tracking helper is not installed")
             elif not self._netmon_status.running:
                 self.app_status_title_label.setText("Per-application tracking helper is not running")
+            elif not self._netmon_status.operational:
+                self.app_status_title_label.setText("Per-application tracking backend is unavailable")
             else:
-                self.app_status_title_label.setText("Per-application tracking helper is available")
+                self.app_status_title_label.setText("Per-application tracking is operational")
         if not rows:
-            if self._settings.app_tracking_enabled and not self._netmon_status.installed:
+            if self._settings.app_tracking_enabled and self._netmon_status.installation_state == "external-helper-required":
+                self.apps_empty_label.setText("Install the separate system helper for per-application tracking.")
+            elif self._settings.app_tracking_enabled and not self._netmon_status.installed:
                 self.apps_empty_label.setText("Per-application helper is not installed.")
             elif self._settings.app_tracking_enabled and not self._netmon_status.running:
                 self.apps_empty_label.setText("Per-application helper is not running.")
+            elif self._settings.app_tracking_enabled and not self._netmon_status.operational:
+                self.apps_empty_label.setText(self._netmon_status.message)
             elif self._settings.app_tracking_enabled:
                 self.apps_empty_label.setText("No application traffic recorded yet.")
             else:
@@ -1468,10 +1489,11 @@ class TrafficMonitorWidget(QWidget):
             return
         if generation != self._history_query_generation or session_id != self._selected_history_session_id:
             return
-        if "not found" in message.lower():
+        safe_message = sanitize_sensitive_text(message)
+        if "not found" in safe_message.lower():
             self._clear_session_detail()
             return
-        self.store_error_label.setText(message)
+        self.store_error_label.setText(safe_message)
 
     def _on_session_chart_mode_changed(self) -> None:
         session_id = self._selected_history_session_id
@@ -1596,12 +1618,14 @@ class TrafficMonitorWidget(QWidget):
         enabled = self._settings.app_tracking_enabled
         if not enabled:
             status_text = "Per-application tracking is off. Proxy/profile tracking is still active."
+        elif self._netmon_status.installation_state == "external-helper-required":
+            status_text = self._netmon_status.message
         elif not self._netmon_status.installed:
             status_text = APP_UNAVAILABLE_TEXT
         elif self._netmon_status.running:
             status_text = self._netmon_status.message
         else:
-            status_text = "Helper is installed but not running."
+            status_text = self._netmon_status.message
         if hasattr(self, "app_status_label"):
             self.app_status_label.setText(status_text)
         if hasattr(self, "app_proxy_warning_label"):
@@ -1610,7 +1634,8 @@ class TrafficMonitorWidget(QWidget):
             self.app_tracking_enabled_label.setText("enabled" if enabled else "disabled")
             self.helper_status_label.setText(
                 f"installed={'yes' if self._netmon_status.installed else 'no'}, "
-                f"running={'yes' if self._netmon_status.running else 'no'}"
+                f"running={'yes' if self._netmon_status.running else 'no'}, "
+                f"operational={'yes' if self._netmon_status.operational else 'no'}"
             )
             self.helper_backend_label.setText(self._netmon_status.backend)
             endpoint = self._netmon_status.api_url or self._netmon_status.socket_path or "not configured"
@@ -1625,14 +1650,22 @@ class TrafficMonitorWidget(QWidget):
         text = (
             f"helper_installed={self._netmon_status.installed}\n"
             f"helper_running={self._netmon_status.running}\n"
+            f"helper_operational={self._netmon_status.operational}\n"
+            f"installation_state={self._netmon_status.installation_state}\n"
+            f"daemon_state={self._netmon_status.daemon_state}\n"
+            f"backend_state={self._netmon_status.backend_state}\n"
+            f"reason_code={self._netmon_status.reason_code}\n"
             f"backend={self._netmon_status.backend}\n"
-            f"endpoint={self._netmon_status.api_url or self._netmon_status.socket_path or 'not configured'}\n"
+            f"service_state={self._netmon_status.service_state}\n"
+            f"socket_path={self._netmon_status.socket_path}\n"
+            f"kernel_supported={self._netmon_status.kernel_supported}\n"
             f"last_response={self._netmon_status.last_response or 'none'}\n"
-            f"last_error={self._netmon_status.last_error or 'none'}"
+            f"last_error={self._netmon_status.last_error or 'none'}\n"
+            f"remediation={self._netmon_status.remediation or 'none'}"
         )
-        clipboard = QApplication.clipboard() if QApplication.instance() else None
-        if clipboard is not None:
-            clipboard.setText(text)
+        result = copy_sanitized_text(text, label="helper diagnostics")
+        if hasattr(self, "app_status_label"):
+            self.app_status_label.setText(result.message)
 
     def _db_writable(self) -> bool:
         if self._store is None:
@@ -1766,7 +1799,7 @@ class TrafficMonitorWidget(QWidget):
         if self._closing:
             return
         self._export_in_flight = False
-        self.store_error_label.setText(message)
+        self.store_error_label.setText(sanitize_sensitive_text(message))
 
     def shutdown(self) -> None:
         """Invalidate UI jobs without stopping the independent netmon service."""

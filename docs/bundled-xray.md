@@ -90,7 +90,7 @@ To update the pinned release:
 
 The fetch script fails if checksums are placeholders or if the archive structure no longer contains `xray`, `geoip.dat`, `geosite.dat`, and `LICENSE`.
 
-Official v0.2.2 binary artifacts target x86-64. The aarch64 mapping and runtime
+Official binary artifacts currently target x86-64. The aarch64 mapping and runtime
 discovery remain available for source development, but ARM64 packages must not be
 published until they are built and verified in native ARM64 CI.
 
@@ -102,8 +102,11 @@ Xray-core is a third-party project. v2link-client bundles the Xray-core license 
 
 Bundled Xray is enough for proxy/profile traffic tracking through Xray's Stats API. Per-application tracking still requires the optional `v2link-netmon` helper service.
 
-AppImage cannot safely install or enable a systemd service automatically. Debian/APT packages install the helper and service file, but users opt in explicitly:
+AppImage cannot safely install or enable a systemd service automatically. It remains unprivileged and reports that a separately installed helper is required. Debian/APT packages install the helper and service file but neither enable nor initially start it. Administrators opt in explicitly:
 
 ```bash
+sudo usermod -aG v2link-netmon "$USER"
 sudo systemctl enable --now v2link-netmon
 ```
+
+Log out and back in after joining the dedicated group. The v0.2.4 backend remains non-operational until the future production eBPF work is completed.
