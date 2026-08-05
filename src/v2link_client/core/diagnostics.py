@@ -12,6 +12,7 @@ import sys
 from typing import Any
 
 from v2link_client import __version__
+from v2link_client.core.logging_setup import sanitize_sensitive_text
 from v2link_client.core.proxy_manager import SNAPSHOT_FILE, get_backend_warning_history
 from v2link_client.core.storage import get_logs_dir, get_state_dir
 from v2link_client.core.traffic_store import get_traffic_db_path
@@ -279,13 +280,28 @@ def _append_runtime_state(lines: list[str], state: Any) -> None:
                 f"installed={'yes' if bool(netmon.get('installed')) else 'no'} "
                 f"running={'yes' if bool(netmon.get('running')) else 'no'}"
             )
+            lines.append(
+                "- App helper states: "
+                f"installation={netmon.get('installation_state') or 'unknown'} "
+                f"daemon={netmon.get('daemon_state') or 'unknown'} "
+                f"backend={netmon.get('backend_state') or 'unknown'} "
+                f"operational={'yes' if bool(netmon.get('operational')) else 'no'} "
+                f"reason={netmon.get('reason_code') or 'unknown'}"
+            )
+            lines.append(f"- App helper service state: {netmon.get('service_state') or 'unknown'}")
+            lines.append(
+                f"- App helper expected binary: {netmon.get('helper_binary_path') or 'n/a'}"
+            )
+            lines.append(
+                f"- App helper expected unit: {netmon.get('service_unit_path') or 'n/a'}"
+            )
             lines.append(f"- App helper socket/API: {netmon.get('api_url') or netmon.get('socket_path') or 'n/a'}")
             lines.append(
                 f"- App helper permission: "
                 f"{'ok' if bool(netmon.get('permission_ok')) else 'not available'}"
             )
-            lines.append(f"- App helper last response: {netmon.get('last_response') or 'none'}")
-            lines.append(f"- App helper last error: {netmon.get('last_error') or 'none'}")
+            lines.append(f"- App helper last response: {sanitize_sensitive_text(str(netmon.get('last_response') or 'none'))}")
+            lines.append(f"- App helper last error: {sanitize_sensitive_text(str(netmon.get('last_error') or 'none'))}")
             lines.append(f"- Kernel support: {netmon.get('kernel_support') or 'unknown/not checked yet'}")
 
     if isinstance(performance, dict):

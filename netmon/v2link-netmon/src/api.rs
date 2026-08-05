@@ -23,8 +23,7 @@ pub fn serve(socket_path: PathBuf, state: Arc<Mutex<SharedState>>) -> Result<()>
     }
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("binding socket {}", socket_path.display()))?;
-    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o666))
-        .with_context(|| format!("setting socket permissions {}", socket_path.display()))?;
+    set_socket_permissions(&socket_path)?;
 
     for stream in listener.incoming() {
         match stream {
@@ -42,40 +41,48 @@ pub fn serve(socket_path: PathBuf, state: Arc<Mutex<SharedState>>) -> Result<()>
     Ok(())
 }
 
+fn set_socket_permissions(socket_path: &std::path::Path) -> Result<()> {
+    fs::set_permissions(socket_path, fs::Permissions::from_mode(0o660))
+        .with_context(|| format!("setting socket permissions {}", socket_path.display()))
+}
+
 fn handle_client(mut stream: UnixStream, state: Arc<Mutex<SharedState>>) -> Result<()> {
     let mut buffer = [0_u8; 4096];
     let read = stream.read(&mut buffer)?;
     let request = String::from_utf8_lossy(&buffer[..read]);
-    let path = parse_path(&request).unwrap_or("/status");
+    let path = parse_path(&request);
     let guard = state
         .lock()
         .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
 
     match path {
-        "/status" => write_json(&mut stream, 200, &guard.status()),
-        "/live" => {
+        Some("/status") => write_json(&mut stream, 200, &guard.status()),
+        Some("/live") => {
             let response = LiveResponse {
                 timestamp: now_iso(),
+                status: guard.status(),
                 apps: guard.apps.values().cloned().collect(),
             };
             write_json(&mut stream, 200, &response)
         }
-        "/apps/today" => {
+        Some("/apps/today") => {
             let response = LiveResponse {
                 timestamp: now_iso(),
+                status: guard.status(),
                 apps: guard.apps.values().cloned().collect(),
             };
             write_json(&mut stream, 200, &response)
         }
-        path if path.starts_with("/apps/history") => {
+        Some(path) if path.starts_with("/apps/history") => {
             let response = HistoryResponse {
                 timestamp: now_iso(),
+                status: guard.status(),
                 days: parse_days(path),
                 apps: guard.apps.values().cloned().collect(),
             };
             write_json(&mut stream, 200, &response)
         }
-        "/diagnostics" => {
+        Some("/diagnostics") => {
             let response = DiagnosticsResponse {
                 status: guard.status(),
                 tracked_processes: 0,
@@ -138,5 +145,29 @@ mod tests {
     fn parses_get_path() {
         assert_eq!(parse_path("GET /status HTTP/1.1\r\n\r\n"), Some("/status"));
         assert_eq!(parse_path("POST /status HTTP/1.1\r\n\r\n"), None);
+        assert_eq!(parse_path("malformed"), None);
+    }
+
+    #[test]
+    fn socket_permissions_are_group_only() {
+        let path =
+            std::env::temp_dir().join(format!("v2link-netmon-socket-mode-{}", std::process::id()));
+        fs::write(&path, b"fixture").expect("create fixture");
+        set_socket_permissions(&path).expect("set socket mode");
+        let mode = fs::metadata(&path)
+            .expect("fixture metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        fs::remove_file(&path).expect("remove fixture");
+        assert_eq!(mode, 0o660);
+    }
+
+    #[test]
+    fn parses_unknown_request_for_not_found_routing() {
+        assert_eq!(
+            parse_path("GET /unknown HTTP/1.1\r\n\r\n"),
+            Some("/unknown")
+        );
     }
 }

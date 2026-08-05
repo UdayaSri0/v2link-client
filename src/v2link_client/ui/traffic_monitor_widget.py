@@ -1143,7 +1143,7 @@ class TrafficMonitorWidget(QWidget):
         if not hasattr(self, "apps_table"):
             return
         rows: list[AppUsageSummary] = []
-        if self._settings.app_tracking_enabled and self._netmon_status.running:
+        if self._settings.app_tracking_enabled and self._netmon_status.operational:
             live_rows = self._netmon_client.get_live_apps()
             if self._store is not None:
                 for row in live_rows:
@@ -1182,17 +1182,25 @@ class TrafficMonitorWidget(QWidget):
         if hasattr(self, "app_search_row"):
             self.app_search_row.setVisible(bool(rows) or helper_available)
         if hasattr(self, "app_status_title_label"):
-            if not self._netmon_status.installed:
+            if self._netmon_status.installation_state == "external-helper-required":
+                self.app_status_title_label.setText("Per-application tracking requires a separate system helper")
+            elif not self._netmon_status.installed:
                 self.app_status_title_label.setText("Per-application tracking helper is not installed")
             elif not self._netmon_status.running:
                 self.app_status_title_label.setText("Per-application tracking helper is not running")
+            elif not self._netmon_status.operational:
+                self.app_status_title_label.setText("Per-application tracking backend is unavailable")
             else:
-                self.app_status_title_label.setText("Per-application tracking helper is available")
+                self.app_status_title_label.setText("Per-application tracking is operational")
         if not rows:
-            if self._settings.app_tracking_enabled and not self._netmon_status.installed:
+            if self._settings.app_tracking_enabled and self._netmon_status.installation_state == "external-helper-required":
+                self.apps_empty_label.setText("Install the separate system helper for per-application tracking.")
+            elif self._settings.app_tracking_enabled and not self._netmon_status.installed:
                 self.apps_empty_label.setText("Per-application helper is not installed.")
             elif self._settings.app_tracking_enabled and not self._netmon_status.running:
                 self.apps_empty_label.setText("Per-application helper is not running.")
+            elif self._settings.app_tracking_enabled and not self._netmon_status.operational:
+                self.apps_empty_label.setText(self._netmon_status.message)
             elif self._settings.app_tracking_enabled:
                 self.apps_empty_label.setText("No application traffic recorded yet.")
             else:
@@ -1596,12 +1604,14 @@ class TrafficMonitorWidget(QWidget):
         enabled = self._settings.app_tracking_enabled
         if not enabled:
             status_text = "Per-application tracking is off. Proxy/profile tracking is still active."
+        elif self._netmon_status.installation_state == "external-helper-required":
+            status_text = self._netmon_status.message
         elif not self._netmon_status.installed:
             status_text = APP_UNAVAILABLE_TEXT
         elif self._netmon_status.running:
             status_text = self._netmon_status.message
         else:
-            status_text = "Helper is installed but not running."
+            status_text = self._netmon_status.message
         if hasattr(self, "app_status_label"):
             self.app_status_label.setText(status_text)
         if hasattr(self, "app_proxy_warning_label"):
@@ -1610,7 +1620,8 @@ class TrafficMonitorWidget(QWidget):
             self.app_tracking_enabled_label.setText("enabled" if enabled else "disabled")
             self.helper_status_label.setText(
                 f"installed={'yes' if self._netmon_status.installed else 'no'}, "
-                f"running={'yes' if self._netmon_status.running else 'no'}"
+                f"running={'yes' if self._netmon_status.running else 'no'}, "
+                f"operational={'yes' if self._netmon_status.operational else 'no'}"
             )
             self.helper_backend_label.setText(self._netmon_status.backend)
             endpoint = self._netmon_status.api_url or self._netmon_status.socket_path or "not configured"
@@ -1625,6 +1636,11 @@ class TrafficMonitorWidget(QWidget):
         text = (
             f"helper_installed={self._netmon_status.installed}\n"
             f"helper_running={self._netmon_status.running}\n"
+            f"helper_operational={self._netmon_status.operational}\n"
+            f"installation_state={self._netmon_status.installation_state}\n"
+            f"daemon_state={self._netmon_status.daemon_state}\n"
+            f"backend_state={self._netmon_status.backend_state}\n"
+            f"reason_code={self._netmon_status.reason_code}\n"
             f"backend={self._netmon_status.backend}\n"
             f"endpoint={self._netmon_status.api_url or self._netmon_status.socket_path or 'not configured'}\n"
             f"last_response={self._netmon_status.last_response or 'none'}\n"

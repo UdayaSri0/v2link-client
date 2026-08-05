@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::SecondsFormat;
-use v2link_netmon_common::{AppCounters, StatusResponse, DEFAULT_SYSTEM_SOCKET};
+use v2link_netmon_common::{AppCounters, StatusResponse, API_VERSION, DEFAULT_SYSTEM_SOCKET};
 
 const DEFAULT_DB_PATH: &str = "/var/lib/v2link-client/netmon.sqlite3";
 const PROXY_ATTRIBUTION_NOTE: &str = "When system proxy is enabled, some app traffic may be represented under Xray because Xray performs the remote encrypted connection.";
@@ -31,20 +31,18 @@ pub struct SharedState {
 impl SharedState {
     fn status(&self) -> StatusResponse {
         StatusResponse {
+            api_version: API_VERSION,
             installed: true,
             running: true,
+            operational: self.backend.operational,
             backend: self.backend.name.clone(),
+            backend_state: self.backend.state.clone(),
+            reason_code: self.backend.reason_code.clone(),
+            counters_available: self.backend.counters_available,
             permission_ok: self.backend.permission_ok,
             kernel_supported: self.backend.kernel_supported,
             started_at: self.started_at.clone(),
-            message: if self.backend.kernel_supported {
-                "v2link-netmon running".to_string()
-            } else {
-                format!(
-                    "v2link-netmon running with backend unavailable: {}",
-                    self.backend.message
-                )
-            },
+            message: self.backend.message.clone(),
             socket_path: self.socket_path.clone(),
             last_error: self.last_error.clone(),
         }
@@ -144,4 +142,26 @@ pub(crate) fn proxy_attribution_note() -> &'static str {
 
 pub(crate) fn privacy_note() -> &'static str {
     PRIVACY_NOTE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_schema_serializes_protocol_v2_fields() {
+        let state = SharedState {
+            started_at: "synthetic".into(),
+            socket_path: DEFAULT_SYSTEM_SOCKET.into(),
+            database_path: "/var/lib/v2link-client/netmon.sqlite3".into(),
+            backend: ebpf::Backend::load().status(),
+            apps: HashMap::new(),
+            last_error: None,
+        };
+        let value = serde_json::to_value(state.status()).expect("serialize status");
+        assert_eq!(value["api_version"], API_VERSION);
+        assert_eq!(value["operational"], false);
+        assert_eq!(value["reason_code"], "backend-not-implemented");
+        assert_eq!(value["counters_available"], false);
+    }
 }
