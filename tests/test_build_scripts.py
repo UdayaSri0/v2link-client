@@ -93,7 +93,7 @@ def test_build_scripts_use_release_artifact_naming() -> None:
 
     assert '${APP_NAME}-${VERSION_NAME}-linux-${ARCH_NAME}.AppImage' in appimage
     assert '${APP_NAME}_${VERSION_NAME}_${ARCH_NAME}.deb' in deb
-    assert "sha256sum *.AppImage *.deb > SHA256SUMS" in release
+    assert "sha256sum ./*.AppImage ./*.deb > SHA256SUMS" in release
 
 
 def test_appimagetool_is_versioned_and_checksum_verified() -> None:
@@ -117,6 +117,7 @@ def test_release_verifier_inspects_extracted_artifacts() -> None:
     assert "root:root" in script
     assert "systemd-analyze verify" in script
     assert "SHA256SUMS lacks current artifact" in script
+    assert "(\\./)?${artifact_name}" in script
     assert "AppImage application runtime version mismatch" in script
     assert "Debian application runtime version mismatch" in script
 

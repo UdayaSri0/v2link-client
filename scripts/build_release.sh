@@ -100,7 +100,7 @@ for required_file in \
 done
 
 cd "${DIST_DIR}"
-sha256sum *.AppImage *.deb > SHA256SUMS
+sha256sum ./*.AppImage ./*.deb > SHA256SUMS
 cd "${ROOT_DIR}"
 "${ROOT_DIR}/scripts/verify_release_artifacts.sh"
 
