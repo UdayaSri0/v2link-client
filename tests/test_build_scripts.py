@@ -155,3 +155,27 @@ def test_release_workflow_runs_netmon_python_and_rust_quality_checks() -> None:
     assert "cargo test --manifest-path netmon/Cargo.toml --workspace --locked" in workflow
     assert "cargo clippy --manifest-path netmon/Cargo.toml" in workflow
     assert "--workspace --all-targets --locked -- -D warnings" in workflow
+
+
+def test_packaged_entrypoint_reaches_diagnostic_privacy_ui() -> None:
+    main_window = (ROOT / "src/v2link_client/ui/main_window.py").read_text(encoding="utf-8")
+    diagnostics = (ROOT / "src/v2link_client/ui/diagnostics_widget.py").read_text(
+        encoding="utf-8"
+    )
+    profile_dialogs = (ROOT / "src/v2link_client/ui/profile_dialogs.py").read_text(
+        encoding="utf-8"
+    )
+    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+
+    assert "from v2link_client.ui.diagnostics_widget import DiagnosticsWidget" in main_window
+    assert "from v2link_client.core.latest_error import LatestErrorStore" in main_window
+    assert "from v2link_client.ui.safe_text_actions import" in diagnostics
+    assert 'QPushButton("Copy latest error")' in diagnostics
+    assert 'QPushButton("Save diagnostics report")' in diagnostics
+    assert 'QPushButton("Copy validation error")' in profile_dialogs
+    for test_name in (
+        "tests/test_logging_setup.py",
+        "tests/test_diagnostics_clipboard_ui.py",
+        "tests/test_latest_error_ui_integration.py",
+    ):
+        assert test_name in workflow

@@ -257,6 +257,16 @@ jobs:
             tests/test_diagnostics.py \
             tests/test_build_scripts.py
 
+      - name: Run focused diagnostics privacy tests
+        run: |
+          python -m pytest -v \
+            tests/test_logging_setup.py \
+            tests/test_diagnostics.py \
+            tests/test_latest_error.py \
+            tests/test_safe_text_actions.py \
+            tests/test_diagnostics_clipboard_ui.py \
+            tests/test_latest_error_ui_integration.py
+
       - name: Run netmon Rust quality checks
         run: |
           cargo fmt --manifest-path netmon/Cargo.toml --all -- --check
