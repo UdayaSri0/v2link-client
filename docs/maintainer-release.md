@@ -90,16 +90,29 @@ builds both packages, verifies the extracted final artifacts, checks
 A real run then:
 
 1. Creates the annotated tag if it is absent.
-2. Creates or safely resumes a draft GitHub Release.
+2. Creates or safely resumes a draft GitHub Release and records its numeric
+   release ID as a job output.
 3. Uploads the exact verified, version-specific assets.
 4. Optionally publishes the same verified `.deb` to the signed APT repository.
-5. Publishes the draft only after the APT job succeeds or is intentionally
-   skipped.
+5. Fetches the draft by its recorded release ID, validates its tag, title,
+   target commit, channel state, and exact asset set, then downloads the assets
+   by asset ID and verifies `SHA256SUMS` again.
+6. Publishes the draft only after those checks pass and the APT job succeeds or
+   is intentionally skipped.
+
+Draft lookup must use the authenticated releases list during recovery or the
+numeric release ID passed from draft creation. GitHub's
+`GET /repos/{owner}/{repo}/releases/tags/{tag}` endpoint does not return draft
+releases and must not be used to retrieve a draft before publication.
 
 Build failures leave no tag or release. If a later stage fails, rerunning is
 safe only when the existing tag points to the same commit and any release is
-still a draft. A failed APT update leaves the GitHub Release as a draft.
-Published releases and tags pointing to another commit are never replaced.
+still a draft. Draft recovery fails clearly if lookup is ambiguous, metadata
+does not match, an asset is missing or incomplete, or checksums fail. The final
+publication step is safely idempotent: if the same release ID is already public
+and all metadata and assets still verify, it reports that no update is needed.
+A failed APT update leaves the GitHub Release as a draft. Published releases and
+tags pointing to another commit are never replaced.
 
 ## Required repository configuration
 
