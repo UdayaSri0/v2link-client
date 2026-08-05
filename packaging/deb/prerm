@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SERVICE="v2link-netmon.service"
+
+case "${1:-}" in
+  remove | deconfigure)
+    if command -v deb-systemd-invoke >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+      deb-systemd-invoke stop "${SERVICE}" >/dev/null 2>&1 || true
+    fi
+    ;;
+  upgrade | failed-upgrade)
+    # Leave a running service active; postinst uses try-restart after upgrade.
+    ;;
+esac
+
+exit 0

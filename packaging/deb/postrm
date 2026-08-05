@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SERVICE="v2link-netmon.service"
+
 case "${1:-}" in
   remove | purge | upgrade | failed-upgrade | disappear)
     if command -v update-desktop-database >/dev/null 2>&1; then
@@ -9,10 +11,17 @@ case "${1:-}" in
     if command -v gtk-update-icon-cache >/dev/null 2>&1; then
       gtk-update-icon-cache -q /usr/share/icons/hicolor || true
     fi
-    if command -v systemctl >/dev/null 2>&1; then
-      systemctl daemon-reload || true
+    if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+      systemctl daemon-reload >/dev/null 2>&1 || true
     fi
     ;;
 esac
+
+if [[ "${1:-}" == "purge" ]] && command -v deb-systemd-helper >/dev/null 2>&1; then
+  deb-systemd-helper purge "${SERVICE}" >/dev/null || true
+fi
+
+# The system account/group and /var/lib/v2link-client are intentionally retained:
+# deleting either automatically can orphan state or permit unsafe UID reuse.
 
 exit 0

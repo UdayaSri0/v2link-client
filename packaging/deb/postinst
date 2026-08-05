@@ -1,6 +1,49 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SERVICE="v2link-netmon.service"
+SERVICE_USER="v2link-netmon"
+SERVICE_GROUP="v2link-netmon"
+
+ensure_service_account() {
+  if ! getent group "${SERVICE_GROUP}" >/dev/null 2>&1; then
+    if command -v addgroup >/dev/null 2>&1; then
+      addgroup --system "${SERVICE_GROUP}" >/dev/null
+    else
+      echo "Warning: addgroup is unavailable; ${SERVICE_GROUP} was not created." >&2
+      return
+    fi
+  fi
+
+  if ! getent passwd "${SERVICE_USER}" >/dev/null 2>&1; then
+    if command -v adduser >/dev/null 2>&1; then
+      adduser --system --ingroup "${SERVICE_GROUP}" --no-create-home \
+        --home /nonexistent --shell /usr/sbin/nologin "${SERVICE_USER}" >/dev/null
+    else
+      echo "Warning: adduser is unavailable; ${SERVICE_USER} was not created." >&2
+    fi
+  fi
+
+  if getent passwd "${SERVICE_USER}" >/dev/null 2>&1; then
+    service_home="$(getent passwd "${SERVICE_USER}" | cut -d: -f6)"
+    service_shell="$(getent passwd "${SERVICE_USER}" | cut -d: -f7)"
+    service_group="$(id -gn "${SERVICE_USER}")"
+    service_uid="$(id -u "${SERVICE_USER}")"
+    uid_min="$(awk '$1 == "UID_MIN" { print $2; exit }' /etc/login.defs 2>/dev/null || true)"
+    uid_min="${uid_min:-1000}"
+    service_password="$(getent shadow "${SERVICE_USER}" 2>/dev/null | cut -d: -f2 || true)"
+    if [[ "${service_group}" != "${SERVICE_GROUP}" || "${service_home}" != "/nonexistent" || \
+      ( "${service_shell}" != "/usr/sbin/nologin" && "${service_shell}" != "/bin/false" ) || \
+      "${service_uid}" -ge "${uid_min}" || \
+      ( "${service_password}" != \!* && "${service_password}" != \** ) ]]; then
+      echo "Error: existing ${SERVICE_USER} account is incompatible with the restricted helper service." >&2
+      exit 1
+    fi
+  fi
+}
+
+ensure_service_account
+
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database -q || true
 fi
@@ -9,18 +52,27 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
   gtk-update-icon-cache -q /usr/share/icons/hicolor || true
 fi
 
-if command -v systemctl >/dev/null 2>&1; then
-  systemctl daemon-reload || true
+if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+  systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+
+if [[ "${1:-}" == "configure" && -n "${2:-}" ]] && \
+  command -v deb-systemd-invoke >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+  # try-restart preserves an inactive/disabled administrator choice on upgrade.
+  deb-systemd-invoke try-restart "${SERVICE}" >/dev/null 2>&1 || true
 fi
 
 cat <<'EOF'
 v2link-netmon optional helper installed.
 
-The helper is local-only and provides read-only per-application traffic
-metadata to v2link-client when enabled. It is not enabled automatically.
+The helper is optional, is not enabled or started automatically, and its
+per-application backend is not operational in this release.
 
-Enable:
+To grant a desktop user access and opt in later, an administrator may run:
+  sudo usermod -aG v2link-netmon "$USER"
   sudo systemctl enable --now v2link-netmon
+
+Log out and back in after changing group membership.
 
 Disable:
   sudo systemctl disable --now v2link-netmon
