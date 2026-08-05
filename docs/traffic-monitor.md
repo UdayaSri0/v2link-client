@@ -42,11 +42,11 @@ Normal desktop user
           |-- local SOCKS/HTTP proxy listeners
           |-- local Stats API when proxy is running
 
-Optional privileged system service
+Optional system service
   v2link-netmon
     |-- Unix socket: /run/v2link-client/netmon.sock
     |-- process identity from /proc
-    |-- eBPF backend interface with graceful unsupported state
+    |-- explicit non-operational placeholder backend in v0.2.4
     |-- local SQLite app usage storage
 ```
 
@@ -135,13 +135,16 @@ The helper communicates with the GUI over a read-only Unix domain socket:
 /run/v2link-client/netmon.sock
 ```
 
-The GUI never runs as root. Debian packages install a systemd service but do not enable it automatically. AppImage builds do not install or enable a systemd service, so they will show the helper as not installed/enabled while proxy/profile tracking continues to work through bundled Xray.
+The GUI never runs as root. Debian packages install a dedicated `v2link-netmon` system account, helper and systemd service, but do not enable or initially start it and do not add desktop users to its group. AppImage builds do not contain or install the helper; they report that an external system helper is required while proxy/profile tracking continues through bundled Xray.
 
-Enable the helper:
+Administrator-controlled opt-in:
 
 ```bash
+sudo usermod -aG v2link-netmon "$USER"
 sudo systemctl enable --now v2link-netmon
 ```
+
+Log out and back in after joining the group. The socket uses mode `0660`; it is not world-accessible.
 
 Disable the helper:
 
@@ -149,7 +152,7 @@ Disable the helper:
 sudo systemctl disable --now v2link-netmon
 ```
 
-The current helper includes the daemon API, SQLite storage, process identity resolver, systemd packaging, and an eBPF backend interface. If eBPF support or permissions are unavailable, it reports that clearly and the GUI falls back to the clean unavailable state.
+The v0.2.4 daemon API explicitly reports `backend-not-implemented`, `operational=false`, and no counters. A reachable daemon is not equivalent to operational attribution. Prompt 3B must implement the production backend and reassess privileges; v0.2.4 grants no Linux capabilities to the placeholder.
 
 Until the helper exists and is enabled, the Applications tab shows a clean unavailable state:
 
@@ -180,6 +183,8 @@ It is not hidden, because Xray really performs the encrypted remote connection w
 - **No proxy/profile traffic:** start Xray from the GUI and check Diagnostics for the Xray stats API server and last query result.
 - **Progressive slowdown or suspected process leak:** run `./scripts/diagnose_runtime_performance.sh` without root, then compare owned PIDs, CPU/RSS, DB/WAL sizes, aggregate row counts, and bounded log sizes. See [runtime performance troubleshooting](runtime-performance-troubleshooting.md).
 - **Detailed history is not wanted:** disable proxy/profile history under Settings. Retention can otherwise be limited to 7, 30, or 90 days (or kept forever explicitly).
-- **Applications tab unavailable:** the optional helper is not installed, not enabled, or not reachable at `/run/v2link-client/netmon.sock`.
-- **Permission/capability warning:** the helper may not have enough privilege or kernel support for eBPF accounting. The GUI remains safe and unprivileged.
-- **AppImage:** AppImage builds include bundled Xray for proxy/profile stats, but they do not install or enable the privileged helper; install the Debian/APT package to use per-app tracking.
+- **Helper not installed:** install/provision the Debian system helper; normal proxy/profile tracking is unaffected.
+- **Installed but inactive/socket missing:** opt in to the service explicitly; installation never starts it automatically.
+- **Permission denied:** join the `v2link-netmon` group and log out/in; never run the GUI as root.
+- **Backend not implemented:** expected in v0.2.4; no per-app counters are available or fabricated.
+- **AppImage:** the AppImage is not damaged. It includes bundled Xray proxy/profile stats but requires a separately installed system helper for optional app attribution.

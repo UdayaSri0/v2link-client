@@ -275,16 +275,20 @@ $XDG_CONFIG_HOME/v2link-client/traffic_settings.json
 
 ## Per-Application Tracking
 
-Per-application tracking is advanced and optional. It is separate from normal proxy/profile traffic tracking, which works through Xray's Stats API without root permission. True Linux app attribution needs the optional privileged helper service `v2link-netmon`, because process/executable attribution must happen outside the unprivileged GUI. The GUI never runs as root.
+Per-application tracking is advanced and optional. It is separate from normal proxy/profile traffic tracking, which works through Xray's Stats API without root permission. The optional system helper `v2link-netmon` is installed by Debian/APT packages under a dedicated non-login account. The GUI never runs as root.
 
-Debian packages install the optional helper and systemd service, but do not enable it automatically:
+The v0.2.4 helper backend is an explicit non-operational placeholder: it reports `backend-not-implemented` and returns no fabricated application counters. A future production eBPF backend requires a separate implementation and privilege review.
+
+Debian packages do not enable or initially start the service, and they do not add desktop users to its group. An administrator may opt in explicitly:
 
 ```bash
+sudo usermod -aG v2link-netmon "$USER"
 sudo systemctl enable --now v2link-netmon
-sudo systemctl disable --now v2link-netmon
 ```
 
-The helper exposes read-only JSON stats over `/run/v2link-client/netmon.sock`. In v0.2.1 this integration remains a prepared, optional path rather than guaranteed full attribution. If the helper, permissions, or eBPF backend are unavailable, the GUI stays unprivileged and shows a clear unavailable/diagnostic state.
+Log out and back in after the group change. The helper socket is restricted to the service account and approved group members. Installed, daemon-reachable, and backend-operational are separate states; a running placeholder is not operational.
+
+AppImage remains unprivileged and does not contain or install the system helper. It reports that a separately installed `v2link-netmon` system helper is required, while normal proxy operation and aggregate Xray traffic history remain available.
 
 ## Privacy
 
@@ -297,12 +301,13 @@ Per-application attribution, when available, is not perfect with a local proxy. 
 ## Troubleshooting Traffic Monitor
 
 - If proxy/profile totals stay at zero, confirm Xray is running and the diagnostics tab shows a configured stats API server.
-- If the Applications tab says the helper is unavailable, enable the optional service with `sudo systemctl enable --now v2link-netmon`.
-- If the helper is running but eBPF is unavailable, check Traffic Monitor diagnostics for kernel/capability details.
+- If the Applications tab says the installed service is inactive, opt in with the administrator-controlled commands above.
+- If access is denied, confirm group membership and log out/in; do not run the GUI as root.
+- If the daemon is reachable but reports `backend-not-implemented`, per-application attribution is unavailable in this release by design.
 - For growing CPU, memory, logs, or suspected leftover processes, run `./scripts/diagnose_runtime_performance.sh` as your normal user. It prints aggregate sizes and process metadata, never profile URLs, credentials, traffic rows, or process arguments. Exit code `1` means it found a possible stale Xray/stats process to inspect; it never kills anything.
 - Closing V2Link stops only the GUI-owned Xray process group and temporary `xray api statsquery` child. The independent system `v2link-netmon.service` may remain running by design.
 - Python logs rotate at 2 MiB with five backups. `xray_stdout.log` is bounded to 2 MiB with two backups. Xray access logging is disabled by default; detailed bounded diagnostic logging can be enabled under **Xray Settings**.
-- AppImage builds work without the helper and will show the helper-unavailable state.
+- AppImage builds work without the helper and report `external-helper-required` for optional per-application attribution.
 
 ## Supported Link Scope
 
