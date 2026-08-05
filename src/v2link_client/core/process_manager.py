@@ -23,6 +23,7 @@ from v2link_client.core.errors import (
     PortInUseError,
 )
 from v2link_client.core.storage import get_logs_dir
+from v2link_client.core.logging_setup import sanitize_sensitive_text
 from v2link_client.core.owned_process import terminate_owned_process
 from v2link_client.core.system_subprocess import build_xray_subprocess_env
 from v2link_client.core.xray_locator import (
@@ -83,9 +84,10 @@ def validate_xray_config(xray: CoreBinary, config_path: Path, *, timeout_s: floa
         )
     cmd = [xray.path, "run", "-test", "-c", str(config_path)]
     env, env_info = build_xray_subprocess_env(xray.path)
+    safe_cmd = sanitize_sensitive_text(" ".join(cmd))
     logger.info(
         "Validating xray config: %s [env_mode=%s removed_env=%s]",
-        cmd,
+        safe_cmd,
         env_info.mode,
         ",".join(env_info.removed_keys) or "none",
     )
@@ -99,14 +101,21 @@ def validate_xray_config(xray: CoreBinary, config_path: Path, *, timeout_s: floa
             env=env,
         )
     except FileNotFoundError as exc:
+        safe_path = sanitize_sensitive_text(xray.path)
         raise BinaryMissingError(
-            f"{xray.name} binary missing: {xray.path}",
-            user_message=f"{xray.name} binary not found: {xray.path}",
+            f"{xray.name} binary missing: {safe_path}",
+            user_message=f"{xray.name} binary not found: {safe_path}",
         ) from exc
     except PermissionError as exc:
+        safe_path = sanitize_sensitive_text(xray.path)
         raise PermissionDeniedError(
-            f"{xray.name} not executable: {xray.path}",
-            user_message=f"{xray.name} binary is not executable: {xray.path}",
+            f"{xray.name} not executable: {safe_path}",
+            user_message=f"{xray.name} binary is not executable: {safe_path}",
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ConfigBuildError(
+            "xray config validation timed out",
+            user_message="Xray configuration validation timed out.",
         ) from exc
 
     if result.returncode == 0:
@@ -114,7 +123,9 @@ def validate_xray_config(xray: CoreBinary, config_path: Path, *, timeout_s: floa
 
     stderr = (result.stderr or "").strip()
     stdout = (result.stdout or "").strip()
-    detail = stderr or stdout or f"exit code {result.returncode}"
+    detail = sanitize_sensitive_text(
+        stderr or stdout or f"exit code {result.returncode}"
+    )
 
     raise ConfigBuildError(
         f"xray config validation failed: {detail}",

@@ -22,7 +22,6 @@ def ping_server(
     *,
     security: str = "none",
     sni: str | None = None,
-    allow_insecure: bool = False,
     timeout_s: float = 3.0,
 ) -> ServerPingResult:
     host = (host or "").strip()
@@ -57,9 +56,6 @@ def ping_server(
 
     def _tls_handshake(server_name: str) -> tuple[int | None, str | None]:
         context = ssl.create_default_context()
-        if allow_insecure:
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
 
         started_tls = time.monotonic()
         try:
@@ -93,4 +89,3 @@ def ping_server(
         tls_host_ms=tls_host_ms,
         error="; ".join(errors) if errors else None,
     )
-

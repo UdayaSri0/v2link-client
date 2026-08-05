@@ -167,7 +167,6 @@ def _build_xray_stream_settings(link: VlessLink) -> dict[str, Any]:
 
     if link.security == "tls":
         tls_settings: dict[str, Any] = {
-            "allowInsecure": link.allow_insecure,
             "serverName": link.sni or link.host,
         }
         # Some share-links set `sni=...` to a value that differs from the
@@ -180,9 +179,13 @@ def _build_xray_stream_settings(link: VlessLink) -> dict[str, Any]:
         #
         # Older `verifyPeerCertInNames` has been removed in newer Xray releases
         # and can make config validation fail.
-        if (
-            not link.allow_insecure
-            and link.sni
+        explicit_verify_names = tuple(
+            getattr(link, "verify_peer_cert_by_name", ()) or ()
+        )
+        if explicit_verify_names:
+            tls_settings["verifyPeerCertByName"] = ",".join(explicit_verify_names)
+        elif (
+            link.sni
             and link.host
             and link.sni.strip()
             and link.sni.strip() != link.host.strip()
@@ -193,6 +196,11 @@ def _build_xray_stream_settings(link: VlessLink) -> dict[str, Any]:
                     verify_names.append(name)
             if verify_names:
                 tls_settings["verifyPeerCertByName"] = ",".join(verify_names)
+        pinned_peer_certs = tuple(
+            getattr(link, "pinned_peer_cert_sha256", ()) or ()
+        )
+        if pinned_peer_certs:
+            tls_settings["pinnedPeerCertSha256"] = ",".join(pinned_peer_certs)
         if link.fingerprint:
             tls_settings["fingerprint"] = link.fingerprint
         if link.alpn:

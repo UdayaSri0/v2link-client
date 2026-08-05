@@ -43,12 +43,14 @@ from v2link_client.core.errors import AppError
 from v2link_client.core.health_check import ProxyHealthResult, check_http_proxy
 from v2link_client.core.humanize import format_bytes, format_duration_s, format_mbps
 from v2link_client.core.link_parser import parse_link
+from v2link_client.core.logging_setup import sanitize_sensitive_text
 from v2link_client.core.netmon_client import NetmonClient
 from v2link_client.core.net_probe import ServerPingResult, ping_server
 from v2link_client.core.profile_store import (
     Profile,
     ProfileStore,
     connection_fingerprint,
+    xray_binary_identity,
 )
 from v2link_client.core.proxy_manager import (
     SystemProxyAuditResult,
@@ -348,7 +350,9 @@ class MainWindow(QMainWindow):
             socks_port=self._socks_port, http_port=self._http_port
         )
         self._thread_pool = QThreadPool.globalInstance()
-        self._profile_store = ProfileStore()
+        self._profile_store = ProfileStore(
+            xray_identity=xray_binary_identity(self._last_xray_resolution)
+        )
         self._selected_profile_id: str | None = None
         self._profile_selector_syncing = False
 
@@ -657,6 +661,7 @@ class MainWindow(QMainWindow):
                 result = locate_xray_binary()
 
             self._last_xray_resolution = result
+            self._profile_store.set_xray_identity(xray_binary_identity(result))
             self._reset_validation_state()
             self.diagnostics_widget.set_hint(
                 f"Xray settings updated: {self._xray_status_summary(result)}"
@@ -799,6 +804,9 @@ class MainWindow(QMainWindow):
     def _on_validate_clicked(self) -> None:
         self._reset_validation_state()
         raw_link = self.link_input.text().strip()
+        existing_profile = self._profile_store.find_by_url(raw_link)
+        if existing_profile is not None:
+            self._profile_store.clear_profile_validation(existing_profile.id)
 
         try:
             parsed_link, config_path, xray, socks_port, http_port, api_port = self._validate_link(
@@ -809,7 +817,9 @@ class MainWindow(QMainWindow):
             return
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception("Validation failed")
-            self.diagnostics_widget.set_hint(f"Validation failed: {exc}")
+            self.diagnostics_widget.set_hint(
+                f"Validation failed: {sanitize_sensitive_text(str(exc))}"
+            )
             return
 
         saved_profile = self._handle_profile_save_after_validation(raw_link, parsed_link)
@@ -817,6 +827,7 @@ class MainWindow(QMainWindow):
         if validation_profile is None:
             validation_profile = self._profile_store.find_by_url(raw_link)
         if validation_profile is not None:
+            self._profile_store.set_xray_identity(xray_binary_identity(xray))
             marked_profile = self._profile_store.mark_profile_validated(validation_profile.id)
             if marked_profile is not None:
                 validation_profile = marked_profile
@@ -941,11 +952,14 @@ class MainWindow(QMainWindow):
         profile = self._profile_for_current_link()
         if profile is None:
             return False
+        self._profile_store.set_xray_identity(
+            xray_binary_identity(self._current_xray_resolution(refresh=False))
+        )
         if not self._profile_store.is_profile_validation_current(profile):
             return False
 
         fingerprint = connection_fingerprint(raw_link)
-        if not fingerprint or profile.validation_fingerprint != fingerprint:
+        if not fingerprint:
             return False
 
         if self._validated_fingerprint == fingerprint and self._validated_link is not None:
@@ -966,7 +980,8 @@ class MainWindow(QMainWindow):
             logger.exception("Failed to restore saved validation for profile %s", profile.id)
             self._profile_store.clear_profile_validation(profile.id)
             self.diagnostics_widget.set_hint(
-                f"Saved validation expired for '{profile.name}': {exc}"
+                f"Saved validation expired for '{profile.name}': "
+                f"{sanitize_sensitive_text(str(exc))}"
             )
             return False
 
@@ -1055,13 +1070,29 @@ class MainWindow(QMainWindow):
 
     def _validate_link_for_dialog(self, raw_link: str) -> tuple[bool, str]:
         try:
-            parsed_link, _, _, _, _, _ = self._validate_link(raw_link, persist_runtime_config=False)
+            parsed_link, _, xray, _, _, _ = self._validate_link(
+                raw_link, persist_runtime_config=False
+            )
         except AppError as exc:
+            existing = self._profile_store.find_by_url(raw_link)
+            if existing is not None:
+                self._profile_store.clear_profile_validation(existing.id)
             return False, exc.user_message
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception("Validation failed in profile dialog")
-            return False, f"Validation failed: {exc}"
-        return True, f"Valid: {parsed_link.display_name()}"
+            existing = self._profile_store.find_by_url(raw_link)
+            if existing is not None:
+                self._profile_store.clear_profile_validation(existing.id)
+            return False, f"Validation failed: {sanitize_sensitive_text(str(exc))}"
+        existing = self._profile_store.find_by_url(raw_link)
+        if existing is not None:
+            self._profile_store.set_xray_identity(xray_binary_identity(xray))
+            self._profile_store.mark_profile_validated(existing.id)
+        message = f"Valid: {parsed_link.display_name()}"
+        warning = self._validation_warning(parsed_link)
+        if warning:
+            message = f"{message} Warning: {warning}"
+        return True, message
 
     def _handle_profile_save_after_validation(self, raw_link: str, parsed_link) -> Profile | None:
         existing = self._profile_store.find_by_url(raw_link)
@@ -2450,7 +2481,6 @@ class MainWindow(QMainWindow):
                 link.port,
                 security=link.security,
                 sni=link.sni,
-                allow_insecure=link.allow_insecure,
                 timeout_s=4.0,
             )
 
@@ -2535,15 +2565,21 @@ class MainWindow(QMainWindow):
     def _validation_warning(self, link) -> str | None:
         if getattr(link, "security", None) != "tls":
             return None
-        if bool(getattr(link, "allow_insecure", False)):
-            return None
+        legacy_allow_insecure = getattr(link, "legacy_allow_insecure", None)
+        if legacy_allow_insecure is True:
+            return (
+                "This profile uses the removed allowInsecure option. "
+                "v2link-client will use secure certificate verification instead. "
+                "If the connection fails, obtain an updated profile containing "
+                "pcs and/or vcn from your service provider."
+            )
 
         host = str(getattr(link, "host", "") or "")
         sni = getattr(link, "sni", None)
         if sni and host and sni != host:
             return (
                 "TLS SNI differs from host. Some servers present a certificate for the host even when SNI differs. "
-                "If connectivity fails, check logs and try setting `sni` to the host (or set allowInsecure=1 if you understand the risk)."
+                "If connectivity fails, check the provider's current secure TLS settings."
             )
         return None
 
