@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+from datetime import datetime, timezone
 import subprocess
 
 import v2link_client.core.diagnostics as diag
@@ -221,3 +223,146 @@ def test_cached_performance_diagnostics_omit_sensitive_identifiers(tmp_path, mon
     assert "Current proxy session active: yes" in report
     assert "session-id-secret" not in report
     assert "credential" not in report.lower()
+
+
+def test_build_report_has_stable_metadata_and_does_not_mutate_state(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(diag, "_tool_available", lambda _name: False)
+    monkeypatch.setattr(diag, "get_state_dir", lambda: tmp_path)
+    monkeypatch.setattr(diag, "get_logs_dir", lambda: tmp_path / "logs")
+    monkeypatch.setattr(diag, "get_backend_warning_history", lambda limit=10: [])
+    generated_at = datetime(2026, 8, 5, 12, 34, 56, tzinfo=timezone.utc)
+    state = {
+        "xray": {
+            "status": "found",
+            "version": "26.3.27",
+            "health_state": "offline",
+            "error": "profile vless://fixture@example.invalid:443",
+        }
+    }
+    original = deepcopy(state)
+
+    report = diag.build_diagnostics_report(state, generated_at=generated_at)
+
+    assert report.startswith("v2link-client diagnostics\nReport schema version: 2")
+    assert "Generated: 2026-08-05T12:34:56+00:00" in report
+    assert "Sensitive values are redacted by default." in report
+    assert "Xray version: 26.3.27" in report
+    assert "vless://<redacted>" in report
+    assert "fixture@example.invalid" not in report
+    assert state == original
+
+
+def test_diagnostics_sanitizes_all_raw_command_and_runtime_channels(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(diag, "_tool_available", lambda name: name == "gsettings")
+    monkeypatch.setattr(diag, "get_state_dir", lambda: tmp_path)
+    monkeypatch.setattr(diag, "get_logs_dir", lambda: tmp_path / "logs")
+    monkeypatch.setattr(
+        diag,
+        "get_backend_warning_history",
+        lambda limit=10: [
+            "failure for fixture.user@example.invalid token=fixture-warning-token"
+        ],
+    )
+
+    def fake_run(cmd, check, capture_output, text, timeout, env):  # noqa: ANN001
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=(
+                "org.gnome.system.proxy mode 'manual'\n"
+                "org.gnome.system.proxy.http authentication-user 'fixture-user'\n"
+                "org.gnome.system.proxy.http authentication-password 'fixture-pass'\n"
+            ),
+            stderr="warning Bearer fixture-bearer-token",
+        )
+
+    monkeypatch.setattr(diag.subprocess, "run", fake_run)
+    state = {
+        "system_proxy": {
+            "backend": "gsettings",
+            "last_audit_error": "password=fixture-audit-pass",
+        },
+        "xray": {
+            "status": "found",
+            "error": "https://subscription.invalid/fetch?token=fixture-url-token",
+            "warning": "identity 01234567-89ab-cdef-0123-456789abcdef",
+        },
+        "traffic": {
+            "diagnostics_error": "cookie=fixture-cookie",
+            "netmon": {
+                "installation_state": "installed",
+                "daemon_state": "connection-refused",
+                "backend_state": "not-implemented",
+                "reason_code": "backend-not-implemented",
+                "last_response": "authorization=fixture-helper-auth",
+                "last_error": "user fixture.helper@example.invalid",
+            },
+        },
+    }
+
+    report = diag.build_diagnostics_report(state)
+
+    for secret in (
+        "fixture.user",
+        "fixture-warning-token",
+        "fixture-user",
+        "fixture-pass",
+        "fixture-bearer-token",
+        "fixture-audit-pass",
+        "fixture-url-token",
+        "01234567-89ab",
+        "fixture-cookie",
+        "fixture-helper-auth",
+        "fixture.helper",
+    ):
+        assert secret not in report
+    assert "connection-refused" in report
+    assert "backend-not-implemented" in report
+    assert "org.gnome.system.proxy.http:authentication-password" in report
+
+
+def test_command_report_is_sanitized_before_return(monkeypatch) -> None:
+    def fake_run(cmd, check, capture_output, text, timeout, env):  # noqa: ANN001
+        return subprocess.CompletedProcess(
+            cmd,
+            1,
+            stdout="",
+            stderr="Authorization: Bearer fixture-command-secret",
+        )
+
+    monkeypatch.setattr(diag.subprocess, "run", fake_run)
+
+    report = diag._run_command(["synthetic-tool"])
+
+    assert not report.ok
+    assert "fixture-command-secret" not in report.output
+    assert "fixture-command-secret" not in report.stderr
+    assert "Authorization" in report.output
+
+
+def test_recent_error_is_included_once_and_sanitized(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(diag, "_tool_available", lambda _name: False)
+    monkeypatch.setattr(diag, "get_state_dir", lambda: tmp_path)
+    monkeypatch.setattr(diag, "get_logs_dir", lambda: tmp_path / "logs")
+    monkeypatch.setattr(diag, "get_backend_warning_history", lambda limit=10: [])
+    state = {
+        "recent_error": {
+            "timestamp": "2026-08-05T10:00:00+00:00",
+            "source": "Xray startup",
+            "severity": "error",
+            "reason_code": "invalid-config",
+            "summary": "Core startup failed",
+            "details": "vless://fixture@example.invalid:443?token=fixture-token",
+        }
+    }
+
+    report = diag.build_diagnostics_report(state)
+
+    assert report.count("Recent Error") == 1
+    assert "Reason code: invalid-config" in report
+    assert "vless://<redacted>" in report
+    assert "fixture-token" not in report

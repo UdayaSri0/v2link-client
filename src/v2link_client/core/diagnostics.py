@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import os
 import platform
 import shlex
@@ -12,7 +13,7 @@ import sys
 from typing import Any
 
 from v2link_client import __version__
-from v2link_client.core.logging_setup import sanitize_sensitive_text
+from v2link_client.core.logging_setup import limit_export_text, sanitize_sensitive_text
 from v2link_client.core.proxy_manager import SNAPSHOT_FILE, get_backend_warning_history
 from v2link_client.core.storage import get_logs_dir, get_state_dir
 from v2link_client.core.traffic_store import get_traffic_db_path
@@ -21,6 +22,8 @@ from v2link_client.core.system_subprocess import (
     get_host_subprocess_env_info,
     system_which,
 )
+
+DIAGNOSTICS_REPORT_SCHEMA_VERSION = 2
 
 @dataclass(frozen=True, slots=True)
 class CommandReport:
@@ -59,16 +62,18 @@ def _run_command(cmd: list[str], *, timeout_s: float = 3.0) -> CommandReport:
     except (OSError, subprocess.TimeoutExpired) as exc:
         return CommandReport(
             ok=False,
-            output=str(exc),
+            output=sanitize_sensitive_text(exc),
             stderr="",
             returncode=None,
-            command=command_text,
+            command=sanitize_sensitive_text(command_text),
             env_mode=env_info.mode,
             removed_env_keys=env_info.removed_keys,
         )
 
-    stdout = (result.stdout or "").strip()
-    stderr = (result.stderr or "").strip()
+    # Command output is untrusted. Sanitize immediately so a CommandReport can
+    # never become an accidental second long-lived copy of desktop credentials.
+    stdout = sanitize_sensitive_text((result.stdout or "").strip())
+    stderr = sanitize_sensitive_text((result.stderr or "").strip())
     if result.returncode != 0:
         detail = stderr or stdout or "unknown error"
         return CommandReport(
@@ -76,7 +81,7 @@ def _run_command(cmd: list[str], *, timeout_s: float = 3.0) -> CommandReport:
             output=detail,
             stderr=stderr,
             returncode=result.returncode,
-            command=command_text,
+            command=sanitize_sensitive_text(command_text),
             env_mode=env_info.mode,
             removed_env_keys=env_info.removed_keys,
         )
@@ -85,7 +90,7 @@ def _run_command(cmd: list[str], *, timeout_s: float = 3.0) -> CommandReport:
         output=stdout,
         stderr=stderr,
         returncode=result.returncode,
-        command=command_text,
+        command=sanitize_sensitive_text(command_text),
         env_mode=env_info.mode,
         removed_env_keys=env_info.removed_keys,
     )
@@ -383,9 +388,39 @@ def _db_app_tables_present(db_path) -> bool:  # noqa: ANN001
     return required.issubset({str(row[0]) for row in rows})
 
 
-def collect_diagnostics(state: Any | None = None) -> str:
+def _append_recent_error(lines: list[str], state: Any) -> None:
+    if not isinstance(state, dict):
+        return
+    recent_error = state.get("recent_error")
+    if not isinstance(recent_error, dict) or not recent_error:
+        return
+    lines.append("Recent Error")
+    lines.append(f"- Timestamp: {recent_error.get('timestamp') or 'unknown'}")
+    lines.append(f"- Source: {recent_error.get('source') or 'application runtime'}")
+    lines.append(f"- Severity: {recent_error.get('severity') or 'error'}")
+    if recent_error.get("reason_code"):
+        lines.append(f"- Reason code: {recent_error.get('reason_code')}")
+    lines.append(f"- Summary: {recent_error.get('summary') or 'Operation failed.'}")
+    if recent_error.get("details"):
+        details = str(recent_error.get("details"))
+        lines.append("- Details:")
+        lines.extend(f"  {line}" for line in details.splitlines())
+    lines.append("")
+
+
+def _collect_diagnostics_text(
+    state: Any | None = None, *, generated_at: datetime | None = None
+) -> str:
+    timestamp = generated_at or datetime.now(timezone.utc)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    else:
+        timestamp = timestamp.astimezone(timezone.utc)
     lines: list[str] = []
     lines.append("v2link-client diagnostics")
+    lines.append(f"Report schema version: {DIAGNOSTICS_REPORT_SCHEMA_VERSION}")
+    lines.append(f"Generated: {timestamp.isoformat(timespec='seconds')}")
+    lines.append("Sensitive values are redacted by default.")
     lines.append("")
 
     lines.append("System")
@@ -465,5 +500,25 @@ def collect_diagnostics(state: Any | None = None) -> str:
     lines.append("")
 
     _append_runtime_state(lines, state)
+    _append_recent_error(lines, state)
 
     return "\n".join(lines)
+
+
+def build_diagnostics_report(
+    state: Any | None = None, *, generated_at: datetime | None = None
+) -> str:
+    """Build the stable, sanitized diagnostics export shown/copied/saved by UI.
+
+    Runtime state is read only. The final whole-report boundary protects both
+    structured fields and any future raw command output, then enforces the
+    shared UTF-8 export-size limit.
+    """
+    return limit_export_text(
+        _collect_diagnostics_text(state=state, generated_at=generated_at)
+    )
+
+
+def collect_diagnostics(state: Any | None = None) -> str:
+    """Backward-compatible entry point for the sanitized diagnostics report."""
+    return build_diagnostics_report(state=state)
