@@ -329,6 +329,7 @@ jobs:
           test "$(find dist -maxdepth 1 -type f -name '*.deb' | wc -l)" -eq 1
 
       - name: Verify Ubuntu 22.04 ABI baseline and clean GUI startup
+        timeout-minutes: 15
         run: |
           python3 scripts/prepare_appdir.py build/AppDir --check --max-glibc 2.35
           appimage=$(find dist -maxdepth 1 -name '*.AppImage' -print -quit)

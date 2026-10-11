@@ -176,6 +176,7 @@ jobs:
           (cd dist && sha256sum -c SHA256SUMS)
 
       - name: Verify Ubuntu 22.04 ABI baseline and clean GUI startup
+        timeout-minutes: 15
         run: |
           python3 scripts/prepare_appdir.py build/AppDir --check --max-glibc 2.35
           appimage=$(find dist -maxdepth 1 -name '*.AppImage' -print -quit)
