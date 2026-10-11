@@ -67,7 +67,7 @@ Also available for Debian/Ubuntu users:
 
 Expected artifact name pattern:
 
-- `v2link-client-<version>-linux-<arch>.AppImage`
+- `v2link-client-<version>-<arch>.AppImage`
 - the currently published official architecture is `x86_64`
 
 2. Make executable and run:
@@ -193,7 +193,7 @@ of which contain Xray-core and its geo assets.
 
 Artifacts are written to `dist/`:
 
-- `v2link-client-<version>-linux-<arch>.AppImage`
+- `v2link-client-<version>-<arch>.AppImage`
 - `v2link-client_<version>_<arch>.deb`
 - `SHA256SUMS`
 
