@@ -10,7 +10,9 @@ for version in 22.04 24.04; do
   docker build --build-arg "UBUNTU_VERSION=${version}" \
     -f "${ROOT_DIR}/packaging/appimage-smoke.Dockerfile" \
     -t "v2link-appimage-smoke:${version}" "${ROOT_DIR}"
-  docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges \
+  echo "Starting clean Ubuntu ${version} container (UID 65534, no network/capabilities)"
+  timeout --signal=TERM --kill-after=15s 300s \
+    docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges \
     --mount "type=bind,src=${IMAGE},dst=/artifacts/app.AppImage,readonly" \
     --mount "type=bind,src=${log_dir},dst=/logs" \
     "v2link-appimage-smoke:${version}"

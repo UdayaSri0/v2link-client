@@ -7,6 +7,7 @@ Diagnostics and the extracted payload's dependency audit are kept in --log-dir.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import re
@@ -16,9 +17,45 @@ import tempfile
 import time
 
 
+@contextmanager
+def display_server(env: dict[str, str], logs: Path):
+    if env.get("DISPLAY"):
+        yield
+        return
+    env["DISPLAY"] = ":99"
+    with (logs / "xvfb.log").open("w") as output:
+        server = subprocess.Popen(
+            ["Xvfb", ":99", "-screen", "0", "1280x900x24", "-nolisten", "tcp", "-ac"],
+            env=env, stdout=output, stderr=subprocess.STDOUT,
+        )
+        try:
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                if server.poll() is not None:
+                    raise RuntimeError(f"Xvfb exited with status {server.returncode}")
+                probe = subprocess.run(["xwininfo", "-root"], env=env,
+                                       capture_output=True, timeout=3)
+                if probe.returncode == 0:
+                    print("Xvfb display ready", flush=True)
+                    break
+                time.sleep(0.2)
+            else:
+                raise RuntimeError("Xvfb did not become ready within 20 seconds")
+            yield
+        finally:
+            if server.poll() is None:
+                server.terminate()
+                try:
+                    server.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    server.kill()
+                    server.wait(timeout=5)
+
+
 def smoke(image: Path, logs: Path, duration: int = 30) -> None:
     logs.mkdir(parents=True, exist_ok=True)
     image = image.resolve()
+    print(f"Starting AppImage smoke test as UID {os.geteuid()}: {image}", flush=True)
     env = dict(os.environ)
     # Isolate user data; do not inherit a developer's Qt paths or loader paths.
     for key in ("LD_LIBRARY_PATH", "LD_PRELOAD", "QT_PLUGIN_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH", "PYTHONPATH", "QT_QPA_PLATFORMTHEME"):
@@ -30,6 +67,7 @@ def smoke(image: Path, logs: Path, duration: int = 30) -> None:
                    XDG_RUNTIME_DIR=str(work / "runtime"), QT_QPA_PLATFORM="xcb",
                    QT_DEBUG_PLUGINS="1", APPIMAGE_EXTRACT_AND_RUN="1")
         (work / "runtime").mkdir(mode=0o700)
+        print("Extracting AppImage", flush=True)
         subprocess.run([str(image), "--appimage-extract"], cwd=work, env=env,
                        check=True, stdout=subprocess.DEVNULL, timeout=120)
         appdir = work / "squashfs-root"
@@ -37,6 +75,7 @@ def smoke(image: Path, logs: Path, duration: int = 30) -> None:
         with (logs / "elf-audit.log").open("w") as output:
             subprocess.run(["python3", str(audit), str(appdir), "--check"],
                            env=env, check=True, stdout=output, stderr=subprocess.STDOUT, timeout=120)
+        print("Extracted ELF dependency audit passed", flush=True)
         assets = appdir / "usr/bin/xray"
         for name in ("xray", "geoip.dat", "geosite.dat", "LICENSE", "VERSION"):
             if not (assets / name).is_file():
@@ -47,7 +86,8 @@ def smoke(image: Path, logs: Path, duration: int = 30) -> None:
         config.write_text('{"inbounds":[],"outbounds":[{"protocol":"freedom","settings":{}}]}')
         subprocess.run([str(assets / "xray"), "run", "-test", "-c", str(config)],
                        env=xray_env, check=True, timeout=15)
-        with (logs / "qt-debug.log").open("w") as output:
+        with display_server(env, logs), (logs / "qt-debug.log").open("w") as output:
+            print("Launching XCB GUI", flush=True)
             process = subprocess.Popen([str(image)], env=env, stdout=output,
                                        stderr=subprocess.STDOUT, start_new_session=True)
             try:

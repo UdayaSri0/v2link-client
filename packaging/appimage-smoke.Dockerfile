@@ -11,4 +11,4 @@ RUN apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https
     done
 COPY scripts/smoke_appimage.py scripts/prepare_appdir.py /test/
 USER 65534:65534
-CMD ["xvfb-run", "-a", "python3", "/test/smoke_appimage.py", "/artifacts/app.AppImage", "--log-dir", "/logs"]
+CMD ["python3", "-u", "/test/smoke_appimage.py", "/artifacts/app.AppImage", "--log-dir", "/logs"]
