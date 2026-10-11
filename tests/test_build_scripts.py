@@ -11,7 +11,7 @@ def test_project_version_is_release_target() -> None:
     from v2link_client.version import get_project_version
 
     data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    assert data["project"]["version"] == "0.2.4"
+    assert data["project"]["version"] == "0.2.5"
     assert get_project_version() == data["project"]["version"]
 
 
@@ -26,7 +26,12 @@ def test_release_documentation_matches_project_version() -> None:
         encoding="utf-8"
     )
 
-    assert f"## [{version}] - 2026-08-05" in changelog
+    import datetime
+    import re
+
+    heading = re.search(rf"^## \[{re.escape(version)}\] - (\d{{4}}-\d{{2}}-\d{{2}})$", changelog, re.M)
+    assert heading is not None
+    datetime.date.fromisoformat(heading.group(1))
     assert release_notes.startswith(f"# v2link-client v{version}\n")
 
 

@@ -119,6 +119,7 @@ XRAY_LOCATION_ASSET="${DEB_ASSETS}" "${DEB_XRAY}" run -test -c "${CONFIG}" >/dev
 [[ "$(dpkg-deb -f "${DEB}" Architecture)" == "amd64" ]] || fail "Debian package is not amd64"
 [[ "$(dpkg-deb -f "${DEB}" Version)" == "${PROJECT_VERSION}" ]] || fail "Debian package version mismatch"
 DEB_DEPENDS="$(dpkg-deb -f "${DEB}" Depends)"
+[[ ", ${DEB_DEPENDS}, " == *", libc6 (>= 2.35), "* ]] || fail "Debian package lacks supported glibc baseline dependency"
 [[ ", ${DEB_DEPENDS}, " == *", adduser, "* ]] || fail "Debian package lacks adduser dependency"
 [[ ", ${DEB_DEPENDS}, " == *", init-system-helpers, "* ]] || fail "Debian package lacks init-system-helpers dependency"
 file "${DEB_XRAY}" | grep -Eq 'x86-64|x86_64' || fail "Debian Xray is not x86-64"

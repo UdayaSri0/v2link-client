@@ -221,6 +221,10 @@ Build the complete release set and checksums:
 
 The Debian build also requires Cargo and `dpkg-deb`. The AppImage build downloads `appimagetool` into the ignored `tools/` directory when it is unavailable. Generated outputs belong in ignored `build/`, `dist/`, `tools/`, and `netmon/target/` directories and must not be committed.
 
+For the complete native build prerequisites and clean Ubuntu GUI tests, see
+[AppImage packaging](appimage-packaging.md). Official release builds target
+glibc 2.35 on Ubuntu 22.04.
+
 Before publishing, verify bundled Xray discovery, source startup, AppImage startup, Debian payload contents, database compatibility, proxy apply/restore, and that no app-owned Xray or stats-query process remains after shutdown.
 
 ## Runtime diagnostics

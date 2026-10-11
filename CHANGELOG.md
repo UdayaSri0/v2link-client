@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.2.5] - 2026-10-11
+
+### Fixed
+
+- Completed and audited the AppImage's native Qt/XCB dependency closure, preventing startup failures such as missing `libxcb-icccm.so.4`.
+- Made missing native build dependencies fatal and explicitly provisioned the required XCB/XKB libraries.
+
+### Changed
+
+- Embedded a checksum-pinned official static type-2 AppImage runtime, removing its host libfuse2 dependency.
+- Kept glibc, graphics drivers and core X11/XCB interfaces on the host; required the official build payload to meet glibc 2.35.
+- Standardized AppImage names to `v2link-client-<version>-x86_64.AppImage`; retained Debian naming and checksum verification.
+- Added AppStream metadata plus runtime and native-library notices.
+- Required visible XCB windows and 30 seconds of GUI survival on clean Ubuntu 22.04 and 24.04 in CI and release verification.
+- Preserved bundled Xray-core v26.3.27, Debian/APT signing, TLS controls and the optional helper's opt-in lifecycle.
+
 ## [0.2.4] - 2026-08-05
 
 ### Added

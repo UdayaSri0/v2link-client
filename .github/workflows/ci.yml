@@ -160,18 +160,18 @@ jobs:
 
       - name: Build and verify release artifacts
         env:
-          VERSION: "0.2.4"
+          VERSION: "0.2.5"
           ARCH: x86_64
         run: ./scripts/build_release.sh
 
       - name: Independently verify artifact names and checksums
         run: |
           ./scripts/verify_release_artifacts.sh
-          test "$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')" = "0.2.4"
-          test -f dist/v2link-client-0.2.4-x86_64.AppImage
-          test -f dist/v2link-client_0.2.4_amd64.deb
-          test "$(dpkg-deb -f dist/v2link-client_0.2.4_amd64.deb Version)" = "0.2.4"
-          test "$(dpkg-deb -f dist/v2link-client_0.2.4_amd64.deb Architecture)" = amd64
+          test "$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')" = "0.2.5"
+          test -f dist/v2link-client-0.2.5-x86_64.AppImage
+          test -f dist/v2link-client_0.2.5_amd64.deb
+          test "$(dpkg-deb -f dist/v2link-client_0.2.5_amd64.deb Version)" = "0.2.5"
+          test "$(dpkg-deb -f dist/v2link-client_0.2.5_amd64.deb Architecture)" = amd64
           grep -Fq "v26.3.27" packaging/xray-release.json
           (cd dist && sha256sum -c SHA256SUMS)
 
@@ -193,10 +193,10 @@ jobs:
       - name: Upload temporary CI artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: v2link-client-0.2.4-ci-artifacts
+          name: v2link-client-0.2.5-ci-artifacts
           path: |
-            dist/v2link-client-0.2.4-x86_64.AppImage
-            dist/v2link-client_0.2.4_amd64.deb
+            dist/v2link-client-0.2.5-x86_64.AppImage
+            dist/v2link-client_0.2.5_amd64.deb
             dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 3

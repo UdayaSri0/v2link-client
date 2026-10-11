@@ -2,7 +2,7 @@
 
 A focused Linux desktop client for V2Ray-style links, built with Python 3.11+, PyQt6, and Xray-core.
 
-**Current release:** v0.2.4 · **Status:** Beta (stable for daily use with a focused feature scope)
+**Current public release:** v0.2.4 · **Prepared candidate:** v0.2.5 (unpublished) · **Status:** Beta (stable for daily use with a focused feature scope)
 
 [Download the latest release](https://github.com/UdayaSri0/v2link-client/releases/latest) · [Changelog](CHANGELOG.md) · [Developer guide](docs/development.md)
 
@@ -46,6 +46,7 @@ See the [v0.2.1 release notes](docs/releases/v0.2.1.md) for the complete upgrade
 
 - Linux desktop environment (GNOME, KDE, or another desktop that can use the local manual proxy endpoints)
 - `x86_64` system for official AppImage and Debian/APT packages
+- Candidate v0.2.5: glibc 2.35 or newer (Ubuntu 22.04 / Linux Mint 21 baseline)
 - `aarch64` source support is retained, but official ARM64 artifacts await native CI
 
 Official AppImage, `.deb`, and APT releases include bundled Xray-core for normal operation. Source builds may use bundled vendor files from `./scripts/fetch_xray_core.sh` or a system `xray` from `PATH` as a fallback.
@@ -369,9 +370,13 @@ from the service provider. The application never invents a certificate pin or
 retrieves one from a remote server. Imported `pcs` values must be valid SHA-256
 certificate fingerprints; `vcn` values select certificate verification names.
 
-### Qt xcb plugin error (`libxcb-cursor.so.0`)
+### Qt/XCB startup errors
 
-Install missing runtime library:
+The v0.2.5 candidate AppImage bundles and audits the XCB utility libraries.
+For source installations, install Qt's native runtime dependencies; see the
+complete list in [AppImage packaging](docs/appimage-packaging.md).
+A missing utility in a v0.2.5 AppImage should be reported as a packaging defect
+with `QT_DEBUG_PLUGINS=1` output. For older builds or source installations:
 
 ```bash
 sudo apt update
