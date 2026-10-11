@@ -47,6 +47,14 @@ jobs:
             libxcb-keysyms1 \
             libxcb-render-util0 \
             libxcb-xkb1 \
+            libxcb-shape0 \
+            libxcb-randr0 \
+            libxcb-xfixes0 \
+            libxcb-sync1 \
+            libxcb-shm0 \
+            libxcb-render0 \
+            libxcb-glx0 \
+            libxcb-util1 \
             libwayland-cursor0 \
             libwayland-egl1 \
             libxkbcommon-x11-0
@@ -127,6 +135,14 @@ jobs:
             libxcb-keysyms1 \
             libxcb-render-util0 \
             libxcb-xkb1 \
+            libxcb-shape0 \
+            libxcb-randr0 \
+            libxcb-xfixes0 \
+            libxcb-sync1 \
+            libxcb-shm0 \
+            libxcb-render0 \
+            libxcb-glx0 \
+            libxcb-util1 \
             libwayland-cursor0 \
             libwayland-egl1 \
             libxkbcommon-x11-0 \

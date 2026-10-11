@@ -11,7 +11,9 @@ Install native dependencies in the **build environment**, before PyInstaller:
 ```sh
 sudo apt install binutils libgl1 libegl1 libdbus-1-3 libxkbcommon-x11-0 \
   libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
-  libxcb-render-util0 libxcb-xkb1 libwayland-cursor0 libwayland-egl1
+  libxcb-render-util0 libxcb-xkb1 libxcb-shape0 libxcb-randr0 libxcb-xfixes0 \
+  libxcb-sync1 libxcb-shm0 libxcb-render0 libxcb-glx0 libxcb-util1 \
+  libwayland-cursor0 libwayland-egl1
 ```
 
 `prepare_appdir.py` reads every ELF object's DT_NEEDED entries, completes the
