@@ -47,12 +47,12 @@ def test_get_semver_defaults_when_no_source_available(monkeypatch) -> None:
 
 def test_frozen_runtime_reads_bundled_pyproject(monkeypatch, tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text(
-        '[project]\nname = "v2link-client"\nversion = "0.2.4"\n',
+        '[project]\nname = "v2link-client"\nversion = "0.2.5"\n',
         encoding="utf-8",
     )
     monkeypatch.setattr(version_mod.sys, "_MEIPASS", str(tmp_path), raising=False)
 
-    assert version_mod._read_pyproject_version() == "0.2.4"
+    assert version_mod._read_pyproject_version() == "0.2.5"
 
 
 def test_version_command_reports_without_starting_gui(monkeypatch, capsys) -> None:
@@ -61,4 +61,4 @@ def test_version_command_reports_without_starting_gui(monkeypatch, capsys) -> No
     monkeypatch.setattr(main_mod.sys, "argv", ["v2link-client", "--version"])
 
     assert main_mod.main() == 0
-    assert capsys.readouterr().out.strip() == "0.2.4"
+    assert capsys.readouterr().out.strip() == "0.2.5"

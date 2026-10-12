@@ -28,7 +28,7 @@ def test_error_is_sanitized_before_storage_and_formatting() -> None:
 
     assert error is not None
     retained = repr(error)
-    copied = format_latest_error(error, application_version="0.2.4")
+    copied = format_latest_error(error, application_version="0.2.5")
     for secret in (
         "fixture.user",
         "01234567-89ab",
@@ -40,7 +40,7 @@ def test_error_is_sanitized_before_storage_and_formatting() -> None:
     assert "Xray validation" in copied
     assert "invalid-response" in copied
     assert "HTTP status: 403" in copied
-    assert "Application version: v0.2.4" in copied
+    assert "Application version: v0.2.5" in copied
     assert "Sensitive values are redacted by default." in copied
 
 

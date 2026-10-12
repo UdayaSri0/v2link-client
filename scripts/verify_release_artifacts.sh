@@ -35,7 +35,7 @@ print(json.loads((Path(os.environ["ROOT_DIR_ENV"]) / "packaging/xray-release.jso
 PY
 )"
 
-mapfile -t APPIMAGES < <(find "${DIST_DIR}" -maxdepth 1 -type f -name "v2link-client-${PROJECT_VERSION}-linux-*.AppImage" -print)
+mapfile -t APPIMAGES < <(find "${DIST_DIR}" -maxdepth 1 -type f -name "v2link-client-${PROJECT_VERSION}-*.AppImage" -print)
 mapfile -t DEBS < <(find "${DIST_DIR}" -maxdepth 1 -type f -name "v2link-client_${PROJECT_VERSION}_*.deb" -print)
 [[ "${#APPIMAGES[@]}" -eq 1 ]] || fail "expected exactly one x86-64 AppImage for ${PROJECT_VERSION}"
 [[ "${#DEBS[@]}" -eq 1 ]] || fail "expected exactly one amd64 Debian package for ${PROJECT_VERSION}"
@@ -43,7 +43,7 @@ require_file "${DIST_DIR}/SHA256SUMS"
 
 APPIMAGE="${APPIMAGES[0]}"
 DEB="${DEBS[0]}"
-[[ "$(basename "${APPIMAGE}")" == *"-linux-x86_64.AppImage" ]] || fail "unexpected AppImage architecture name"
+[[ "$(basename "${APPIMAGE}")" == *"-x86_64.AppImage" ]] || fail "unexpected AppImage architecture name"
 [[ "$(basename "${DEB}")" == *"_amd64.deb" ]] || fail "unexpected Debian architecture name"
 for artifact in "${APPIMAGE}" "${DEB}"; do
   artifact_name="$(basename "${artifact}")"
@@ -55,6 +55,11 @@ done
 APP_EXTRACT="${TMP_DIR}/appimage"
 mkdir -p "${APP_EXTRACT}"
 (cd "${APP_EXTRACT}" && APPIMAGE_EXTRACT_AND_RUN=1 "${APPIMAGE}" --appimage-extract >/dev/null)
+if readelf -l "${APPIMAGE}" | grep -q INTERP || readelf -d "${APPIMAGE}" | grep -q NEEDED; then
+  fail "AppImage runtime is not static"
+fi
+require_file "${APP_EXTRACT}/squashfs-root/usr/share/metainfo/io.github.UdayaSri0.v2link-client.metainfo.xml"
+python3 "${ROOT_DIR}/scripts/prepare_appdir.py" "${APP_EXTRACT}/squashfs-root" --check
 APP_XRAY="${APP_EXTRACT}/squashfs-root/usr/bin/xray/xray"
 APP_ASSETS="$(dirname "${APP_XRAY}")"
 for item in xray geoip.dat geosite.dat LICENSE VERSION; do
@@ -114,6 +119,7 @@ XRAY_LOCATION_ASSET="${DEB_ASSETS}" "${DEB_XRAY}" run -test -c "${CONFIG}" >/dev
 [[ "$(dpkg-deb -f "${DEB}" Architecture)" == "amd64" ]] || fail "Debian package is not amd64"
 [[ "$(dpkg-deb -f "${DEB}" Version)" == "${PROJECT_VERSION}" ]] || fail "Debian package version mismatch"
 DEB_DEPENDS="$(dpkg-deb -f "${DEB}" Depends)"
+[[ ", ${DEB_DEPENDS}, " == *", libc6 (>= 2.35), "* ]] || fail "Debian package lacks supported glibc baseline dependency"
 [[ ", ${DEB_DEPENDS}, " == *", adduser, "* ]] || fail "Debian package lacks adduser dependency"
 [[ ", ${DEB_DEPENDS}, " == *", init-system-helpers, "* ]] || fail "Debian package lacks init-system-helpers dependency"
 file "${DEB_XRAY}" | grep -Eq 'x86-64|x86_64' || fail "Debian Xray is not x86-64"

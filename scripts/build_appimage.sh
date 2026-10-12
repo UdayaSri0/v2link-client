@@ -105,7 +105,7 @@ resolve_appimagetool() {
 ARCH_NAME="${ARCH:-$(normalize_arch)}"
 VERSION_NAME="$(detect_version)"
 APPIMAGE_TOOL_BIN="$(resolve_appimagetool)"
-OUTPUT_FILE="${DIST_DIR}/${APP_NAME}-${VERSION_NAME}-linux-${ARCH_NAME}.AppImage"
+OUTPUT_FILE="${DIST_DIR}/${APP_NAME}-${VERSION_NAME}-${ARCH_NAME}.AppImage"
 XRAY_VENDOR_DIR="${ROOT_DIR}/vendor/xray/${ARCH_NAME}"
 
 ensure_bundled_xray() {
@@ -133,6 +133,22 @@ cp "${XRAY_VENDOR_DIR}/VERSION" "${APPDIR}/usr/bin/xray/VERSION"
 cp "${DESKTOP_SRC}" "${APPDIR}/${APP_NAME}.desktop"
 cp "${ICON_SRC}" "${APPDIR}/${APP_NAME}.png"
 chmod 0755 "${APPDIR}/usr/bin/xray/xray"
+mkdir -p "${APPDIR}/usr/share/metainfo" "${APPDIR}/usr/share/applications"
+cp "${ROOT_DIR}/packaging/io.github.UdayaSri0.v2link-client.metainfo.xml" "${APPDIR}/usr/share/metainfo/"
+cp "${DESKTOP_SRC}" "${APPDIR}/usr/share/applications/${APP_NAME}.desktop"
+mkdir -p "${APPDIR}/usr/share/doc/${APP_NAME}/native-licenses"
+cp "${ROOT_DIR}/docs/THIRD_PARTY_NOTICES.md" "${APPDIR}/usr/share/doc/${APP_NAME}/"
+cp "${ROOT_DIR}/packaging/licenses/appimage-runtime.txt" "${APPDIR}/usr/share/doc/${APP_NAME}/"
+for package in libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+  libxcb-render-util0 libxcb-xkb1 libxcb-shape0 libxcb-randr0 libxcb-xfixes0 \
+  libxcb-sync1 libxcb-shm0 libxcb-render0 libxcb-glx0 libxcb-util1 \
+  libxkbcommon0 libxkbcommon-x11-0 libwayland-cursor0 libwayland-egl1; do
+  copyright_file="/usr/share/doc/${package}/copyright"
+  if [[ -f "${copyright_file}" ]]; then
+    cp -L "${copyright_file}" "${APPDIR}/usr/share/doc/${APP_NAME}/native-licenses/${package}.copyright"
+  fi
+done
+python3 "${ROOT_DIR}/scripts/prepare_appdir.py" "${APPDIR}"
 
 cat >"${APPDIR}/AppRun" <<EOF
 #!/usr/bin/env bash
@@ -159,9 +175,10 @@ if find "${APPDIR}" \( -name 'v2link-netmon' -o -name 'v2link-netmon.service' \)
 fi
 
 rm -f "${OUTPUT_FILE}"
+RUNTIME_FILE="$(ARCH="${ARCH_NAME}" "${ROOT_DIR}/scripts/fetch_appimage_runtime.sh")"
 echo "Building AppImage with ${APPIMAGE_TOOL_BIN}..."
 ARCH="${ARCH_NAME}" VERSION="${VERSION_NAME}" APPIMAGE_EXTRACT_AND_RUN=1 \
-  "${APPIMAGE_TOOL_BIN}" "${APPDIR}" "${OUTPUT_FILE}"
+  "${APPIMAGE_TOOL_BIN}" --runtime-file "${RUNTIME_FILE}" "${APPDIR}" "${OUTPUT_FILE}"
 chmod +x "${OUTPUT_FILE}"
 
 echo "AppImage ready: ${OUTPUT_FILE}"

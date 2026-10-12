@@ -42,6 +42,21 @@ jobs:
             libegl1 \
             libgl1 \
             libxcb-cursor0 \
+            libxcb-icccm4 \
+            libxcb-image0 \
+            libxcb-keysyms1 \
+            libxcb-render-util0 \
+            libxcb-xkb1 \
+            libxcb-shape0 \
+            libxcb-randr0 \
+            libxcb-xfixes0 \
+            libxcb-sync1 \
+            libxcb-shm0 \
+            libxcb-render0 \
+            libxcb-glx0 \
+            libxcb-util1 \
+            libwayland-cursor0 \
+            libwayland-egl1 \
             libxkbcommon-x11-0
 
       - name: Install Python dependencies
@@ -109,11 +124,27 @@ jobs:
           sudo apt-get install -y \
             curl \
             dpkg-dev \
+            binutils \
             file \
             libdbus-1-3 \
             libegl1 \
             libgl1 \
             libxcb-cursor0 \
+            libxcb-icccm4 \
+            libxcb-image0 \
+            libxcb-keysyms1 \
+            libxcb-render-util0 \
+            libxcb-xkb1 \
+            libxcb-shape0 \
+            libxcb-randr0 \
+            libxcb-xfixes0 \
+            libxcb-sync1 \
+            libxcb-shm0 \
+            libxcb-render0 \
+            libxcb-glx0 \
+            libxcb-util1 \
+            libwayland-cursor0 \
+            libwayland-egl1 \
             libxkbcommon-x11-0 \
             shellcheck \
             unzip
@@ -129,28 +160,43 @@ jobs:
 
       - name: Build and verify release artifacts
         env:
-          VERSION: "0.2.4"
+          VERSION: "0.2.5"
           ARCH: x86_64
         run: ./scripts/build_release.sh
 
       - name: Independently verify artifact names and checksums
         run: |
           ./scripts/verify_release_artifacts.sh
-          test "$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')" = "0.2.4"
-          test -f dist/v2link-client-0.2.4-linux-x86_64.AppImage
-          test -f dist/v2link-client_0.2.4_amd64.deb
-          test "$(dpkg-deb -f dist/v2link-client_0.2.4_amd64.deb Version)" = "0.2.4"
-          test "$(dpkg-deb -f dist/v2link-client_0.2.4_amd64.deb Architecture)" = amd64
+          test "$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')" = "0.2.5"
+          test -f dist/v2link-client-0.2.5-x86_64.AppImage
+          test -f dist/v2link-client_0.2.5_amd64.deb
+          test "$(dpkg-deb -f dist/v2link-client_0.2.5_amd64.deb Version)" = "0.2.5"
+          test "$(dpkg-deb -f dist/v2link-client_0.2.5_amd64.deb Architecture)" = amd64
           grep -Fq "v26.3.27" packaging/xray-release.json
           (cd dist && sha256sum -c SHA256SUMS)
+
+      - name: Verify Ubuntu 22.04 ABI baseline and clean GUI startup
+        timeout-minutes: 15
+        run: |
+          python3 scripts/prepare_appdir.py build/AppDir --check --max-glibc 2.35
+          appimage=$(find dist -maxdepth 1 -name '*.AppImage' -print -quit)
+          ./scripts/test_appimage_clean.sh "${appimage}"
+
+      - name: Upload GUI smoke diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: appimage-smoke-diagnostics
+          path: build/smoke-*/
+          retention-days: 7
 
       - name: Upload temporary CI artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: v2link-client-0.2.4-ci-artifacts
+          name: v2link-client-0.2.5-ci-artifacts
           path: |
-            dist/v2link-client-0.2.4-linux-x86_64.AppImage
-            dist/v2link-client_0.2.4_amd64.deb
+            dist/v2link-client-0.2.5-x86_64.AppImage
+            dist/v2link-client_0.2.5_amd64.deb
             dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 3

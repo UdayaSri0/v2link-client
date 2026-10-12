@@ -12,7 +12,7 @@ WRAPPER_TEMPLATE="${DEB_TEMPLATE_DIR}/v2link-client-wrapper.in"
 DESKTOP_SRC="${DEB_TEMPLATE_DIR}/v2link-client.desktop"
 ICON_SRC="${ROOT_DIR}/packaging/icon.png"
 NETMON_SERVICE_SRC="${DEB_TEMPLATE_DIR}/v2link-netmon.service"
-DEPENDS="adduser, init-system-helpers, libegl1, libgl1, libxkbcommon-x11-0, libdbus-1-3, libxcb-cursor0"
+DEPENDS="adduser, init-system-helpers, libc6 (>= 2.35), libegl1, libgl1, libxkbcommon-x11-0, libdbus-1-3, libxcb-cursor0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-render-util0, libxcb-xkb1, libxcb-shape0, libxcb-randr0, libxcb-xfixes0, libxcb-sync1, libxcb-shm0, libxcb-render0, libxcb-glx0, libxcb-util1"
 
 if [[ ! -d "${PYINSTALLER_DIR}" ]]; then
   "${ROOT_DIR}/scripts/build_pyinstaller.sh"

@@ -1,0 +1,9 @@
+.git
+.venv
+build
+dist
+tools
+netmon/target
+vendor
+__pycache__
+.pytest_cache

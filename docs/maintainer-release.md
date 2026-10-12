@@ -14,7 +14,9 @@ selected default-branch commit, and defaults to a non-publishing dry run.
    default branch.
 5. Run the workflow with `dry_run` enabled.
 6. Download and inspect the versioned workflow artifact. It contains the
-   AppImage, Debian package, and `SHA256SUMS`.
+   AppImage, Debian package, and `SHA256SUMS`. The build must also pass the
+   clean Ubuntu 22.04 and 24.04 XCB GUI tests and glibc 2.35 baseline audit;
+   inspect the uploaded smoke diagnostics before approving publication.
 7. Only after the dry run succeeds, run the workflow again with `dry_run`
    disabled and the exact confirmation `RELEASE`.
 8. Confirm the GitHub Release and, when selected, the signed APT repository.
